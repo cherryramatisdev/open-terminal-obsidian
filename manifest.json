@@ -1,0 +1,9 @@
+{
+  "id": "open-terminal",
+  "name": "Open Terminal",
+  "version": "2.0.0",
+  "minAppVersion": "1.0.0",
+  "description": "Terminal embutido no Obsidian (xterm.js + node-pty), aberto na pasta do vault ou da nota atual.",
+  "author": "Alicia de Paula",
+  "isDesktopOnly": true
+}
