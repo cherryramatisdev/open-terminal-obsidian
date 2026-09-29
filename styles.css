@@ -297,3 +297,69 @@
 .open-terminal-xterm .xterm-viewport {
   background-color: var(--background-primary) !important;
 }
+
+/* ---- Terminals in ```terminal blocks (notes and Canvas) ---- */
+.open-terminal-block {
+  display: flex;
+  flex-direction: column;
+  height: 320px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  overflow: hidden;
+  background-color: var(--background-primary);
+}
+.open-terminal-block-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--background-modifier-border);
+  background-color: var(--background-secondary);
+  cursor: grab;
+}
+.open-terminal-block-icon {
+  display: flex;
+}
+.open-terminal-block-icon svg {
+  width: 14px;
+  height: 14px;
+}
+.open-terminal-block-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.open-terminal-block-button {
+  padding: 2px;
+  cursor: pointer;
+}
+.open-terminal-block-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 4px 0 0 8px;
+  overflow: hidden;
+  cursor: text;
+}
+
+/* In Canvas the block fills the whole card (height is set from JS) */
+.open-terminal-block.is-canvas {
+  border: none;
+  border-radius: 0;
+}
+.canvas-node-content:has(.open-terminal-block) {
+  overflow: hidden;
+}
+.canvas-node-content:has(.open-terminal-block) .markdown-preview-view,
+.canvas-node-content:has(.open-terminal-block) .markdown-preview-sizer {
+  padding: 0 !important;
+  margin: 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+.canvas-node-content .open-terminal-block-body {
+  pointer-events: auto;
+}

@@ -4,7 +4,8 @@
   "description": "",
   "main": "main.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "node esbuild.config.mjs",
+    "dev": "node esbuild.config.mjs --watch"
   },
   "keywords": [],
   "type": "commonjs",
@@ -12,5 +13,8 @@
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "node-pty": "^1.1.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.12"
   }
 }

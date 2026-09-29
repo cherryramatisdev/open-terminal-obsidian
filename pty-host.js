@@ -1,9 +1,9 @@
 "use strict";
 
-// Processo auxiliar executado com o Node do sistema.
-// Mantém o pseudoterminal (node-pty) e conversa com o plugin via stdio:
-//   stdin  -> linhas JSON: {t:"i",d:"texto"} | {t:"r",c:cols,r:rows} | {t:"k"}
-//   stdout -> saída bruta do terminal (UTF-8)
+// Helper process run with the system Node.js.
+// Owns the pseudoterminal (node-pty) and talks to the plugin over stdio:
+//   stdin  -> JSON lines: {t:"i",d:"text"} | {t:"r",c:cols,r:rows} | {t:"k"}
+//   stdout -> raw terminal output (UTF-8)
 
 const pty = require("node-pty");
 
