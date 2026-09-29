@@ -2,7 +2,6 @@
 
 A cozy little terminal for [Obsidian](https://obsidian.md), built with [xterm.js](https://xtermjs.org/) and [node-pty](https://github.com/microsoft/node-pty). It opens a real shell right where you need it — at your vault root, or in the folder of the note you're staring at — so you never have to alt-tab away from your notes just to run a command.
 
-> 🚧 **Work in progress!** This is a personal plugin, still growing and occasionally rough around the edges. Things may change, break, or get polished without warning. Contributions, bug reports, and gentle nudges are very welcome.
 
 Desktop only (Windows, macOS, Linux) — sorry mobile, terminals just don't fit in your pocket yet. 📱🚫
 
@@ -139,9 +138,6 @@ Commit the rebuilt `main.js` along with your `src/` changes, so the plugin still
 | `src/settings-tab.js` | The settings tab. |
 | `pty-host.js` | Standalone helper process run with the system Node.js (not bundled). |
 
-## 🗺️ Roadmap-ish
-
-Nothing formal yet — this plugin grows as it's needed. Ideas, issues, and PRs are welcome while it finds its shape.
 
 ## 📄 License
 
