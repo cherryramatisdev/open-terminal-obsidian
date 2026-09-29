@@ -286,8 +286,9 @@
 
 /* ---- Open Terminal ---- */
 .open-terminal-container {
-  padding: 4px 0 0 8px !important;
+  padding: 8px 0 4px 12px !important;
   overflow: hidden !important;
+  -webkit-font-smoothing: antialiased;
   background-color: var(--background-primary);
 }
 .open-terminal-xterm {

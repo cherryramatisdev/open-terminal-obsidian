@@ -57,22 +57,47 @@ class TerminalSession {
     const css = getComputedStyle(document.body);
     const cssVar = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
 
+    const isMac = process.platform === "darwin";
+    // On macOS, Obsidian's --font-monospace can resolve to a proportional/unloaded font,
+    // which makes xterm's cell measurement wrong (uneven, wide letter spacing).
+    const monoFallback = "'SF Mono', SFMono-Regular, Menlo, Monaco, Consolas, 'Courier New', monospace";
+    const fontFamily = isMac
+      ? monoFallback
+      : `${cssVar("--font-monospace", "Consolas")}, ${monoFallback}`;
+
     this.term = new Terminal({
       cursorBlink: true,
+      cursorStyle: "bar",
+      cursorWidth: 2,
       fontSize: this.plugin.settings.fontSize,
-      fontFamily: cssVar("--font-monospace", "Consolas, 'Courier New', monospace"),
+      fontFamily,
+      letterSpacing: 0,
+      lineHeight: isMac ? 1.25 : 1.1,
+      fontWeight: "400",
+      fontWeightBold: "600",
+      macOptionIsMeta: isMac,
       scrollback: 5000,
       allowProposedApi: true,
       theme: {
         background: cssVar("--background-primary", "#1e1e1e"),
         foreground: cssVar("--text-normal", "#dcddde"),
         cursor: cssVar("--text-accent", "#7f6df2"),
+        cursorAccent: cssVar("--background-primary", "#1e1e1e"),
         selectionBackground: cssVar("--text-selection", "rgba(127,109,242,0.35)"),
       },
     });
     this.fit = new FitAddon();
     this.term.loadAddon(this.fit);
     this.term.open(this.el);
+
+    // Re-measure the character cell once fonts are ready
+    if (document.fonts && document.fonts.ready) {
+      document.fonts.ready.then(() => {
+        if (!this.term) return;
+        this.term.options.fontFamily = fontFamily;
+        this.resize();
+      });
+    }
 
     // Ctrl+C copies when there is a selection; Ctrl+V / Ctrl+Shift+V paste
     this.term.attachCustomKeyEventHandler((e) => {
