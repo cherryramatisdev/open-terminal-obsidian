@@ -8,9 +8,10 @@ const { spawn } = require("child_process");
  * needed for Canvas, which unloads cards that are off-screen.
  */
 class TerminalSession {
-  constructor(plugin, { cwd, command } = {}) {
+  constructor(plugin, { cwd, command, env } = {}) {
     this.plugin = plugin;
     this.cwd = cwd;
+    this.env = env;
     this.pendingCommand = command || null;
     this.host = null;
     this.term = null;
@@ -140,6 +141,7 @@ class TerminalSession {
 
     const host = spawn(node, hostArgs, {
       cwd: this.plugin.pluginDir(),
+      env: { ...process.env, ...this.env },
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });

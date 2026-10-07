@@ -30,7 +30,7 @@ class TerminalView extends ItemView {
   }
 
   async setState(state, result) {
-    if (state && state.cwd && !this.session) this.startSession(state.cwd, state.command);
+    if (state && state.cwd && !this.session) this.startSession(state.cwd, state.command, state.env);
     await super.setState(state, result);
   }
 
@@ -44,10 +44,10 @@ class TerminalView extends ItemView {
     }, 150);
   }
 
-  startSession(cwd, command) {
+  startSession(cwd, command, env) {
     if (!cwd) return;
     this.cwd = cwd;
-    this.session = new TerminalSession(this.plugin, { cwd, command });
+    this.session = new TerminalSession(this.plugin, { cwd, command, env });
     this.session.onReveal = () => {
       this.app.workspace.revealLeaf(this.leaf);
       this.app.workspace.setActiveLeaf(this.leaf, { focus: true });

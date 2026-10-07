@@ -34,22 +34,25 @@ function newBlockMarkdown() {
 }
 
 class BlockSessions {
-  constructor(plugin) {
+  constructor(plugin, { language = BLOCK_LANG, createSession } = {}) {
     this.plugin = plugin;
+    this.language = language;
+    this.createSession = createSession || ((opts, ctx) => new TerminalSession(this.plugin, {
+      cwd: this.resolveCwd(opts.cwd, ctx.sourcePath),
+      command: opts.command,
+    }));
     this.sessions = new Map(); // block key -> TerminalSession
     this.orphanTimers = new Map();
   }
 
-  /** Markdown code block processor for ```terminal. */
-  process(source, el, ctx) {
+  /** Markdown code block processor for a terminal-like block. */
+  async process(source, el, ctx) {
     const opts = parseBlockOptions(source);
     const key = blockKey(source, ctx.sourcePath);
     let session = this.sessions.get(key);
     if (!session || session.disposed) {
-      session = new TerminalSession(this.plugin, {
-        cwd: this.resolveCwd(opts.cwd, ctx.sourcePath),
-        command: opts.command,
-      });
+      session = await this.createSession(opts, ctx, source);
+      if (!session) return;
       this.sessions.set(key, session);
     }
     ctx.addChild(new TerminalBlockChild(el, this, session, key, ctx.sourcePath));
@@ -91,6 +94,7 @@ class BlockSessions {
             return;
           }
         }
+        if (keys === null) return;
         if (!keys.has(key) && !session.isAttached()) {
           session.dispose();
           this.sessions.delete(key);
@@ -102,11 +106,15 @@ class BlockSessions {
   keysInFile(content, file) {
     let texts = [content];
     if (file.extension === "canvas") {
-      const data = JSON.parse(content);
-      texts = (data.nodes || []).filter((n) => n.type === "text").map((n) => n.text || "");
+      try {
+        const data = JSON.parse(content);
+        texts = (data.nodes || []).filter((n) => n.type === "text").map((n) => n.text || "");
+      } catch {
+        return null;
+      }
     }
     const keys = new Set();
-    const fence = new RegExp("^(`{3,}|~{3,})[ \\t]*" + BLOCK_LANG + "[ \\t]*\\r?\\n([\\s\\S]*?)^\\1[ \\t]*$", "gm");
+    const fence = new RegExp("^(`{3,}|~{3,})[ \\t]*" + this.language + "[ \\t]*\\r?\\n([\\s\\S]*?)^\\1[ \\t]*$", "gm");
     for (const text of texts) {
       for (const m of text.matchAll(fence)) keys.add(blockKey(m[2], file.path));
     }
