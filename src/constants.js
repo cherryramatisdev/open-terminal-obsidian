@@ -11,6 +11,8 @@ const DEFAULT_SETTINGS = {
   location: "bottom",
   // Empty = auto-detect
   nodePath: "",
+  // Empty = resolve "pi" from PATH when launching a managed harness.
+  piPath: "",
   fontSize: 14,
 };
 

@@ -62,6 +62,19 @@ class OpenTerminalSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Pi executable")
+      .setDesc('Pi executable for managed Canvas harnesses. Leave empty to use "pi" from PATH.')
+      .addText((t) =>
+        t
+          .setPlaceholder("pi")
+          .setValue(s.piPath)
+          .onChange(async (v) => {
+            s.piPath = v;
+            await save();
+          })
+      );
+
+    new Setting(containerEl)
       .setName("Font size")
       .setDesc("Applies to terminals opened after the change.")
       .addSlider((sl) =>

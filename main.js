@@ -19,6 +19,8 @@ var require_constants = __commonJS({
       location: "bottom",
       // Empty = auto-detect
       nodePath: "",
+      // Empty = resolve "pi" from PATH when launching a managed harness.
+      piPath: "",
       fontSize: 14
     };
     var SHELLS = {
@@ -36,7 +38,7 @@ var require_constants = __commonJS({
 var require_shell = __commonJS({
   "src/shell.js"(exports2, module2) {
     "use strict";
-    var fs = require("fs");
+    var fs2 = require("fs");
     var path2 = require("path");
     var { SHELLS } = require_constants();
     function getShell(settings) {
@@ -62,7 +64,7 @@ var require_shell = __commonJS({
       } else {
         candidates.push("/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node");
       }
-      return candidates.find((c) => fs.existsSync(c)) || null;
+      return candidates.find((c) => fs2.existsSync(c)) || null;
     }
     function quoteArg(shellCmd, arg) {
       const shell2 = shellCmd.toLowerCase();
@@ -88,10 +90,11 @@ var require_terminal_session = __commonJS({
   "src/terminal-session.js"(exports2, module2) {
     "use strict";
     var { spawn } = require("child_process");
-    var TerminalSession = class {
-      constructor(plugin, { cwd, command } = {}) {
+    var TerminalSession2 = class {
+      constructor(plugin, { cwd, command, env } = {}) {
         this.plugin = plugin;
         this.cwd = cwd;
+        this.env = env;
         this.pendingCommand = command || null;
         this.host = null;
         this.term = null;
@@ -199,6 +202,7 @@ var require_terminal_session = __commonJS({
         const hostArgs = [this.plugin.hostPath(), this.cwd, cmd, String(this.term.cols), String(this.term.rows), ...args];
         const host = spawn(node, hostArgs, {
           cwd: this.plugin.pluginDir(),
+          env: { ...process.env, ...this.env },
           windowsHide: true,
           stdio: ["pipe", "pipe", "pipe"]
         });
@@ -311,7 +315,7 @@ var require_terminal_session = __commonJS({
         }
       }
     };
-    module2.exports = { TerminalSession };
+    module2.exports = { TerminalSession: TerminalSession2 };
   }
 });
 
@@ -322,7 +326,7 @@ var require_terminal_view = __commonJS({
     var { ItemView } = require("obsidian");
     var path2 = require("path");
     var { VIEW_TYPE: VIEW_TYPE2 } = require_constants();
-    var { TerminalSession } = require_terminal_session();
+    var { TerminalSession: TerminalSession2 } = require_terminal_session();
     var TerminalView2 = class extends ItemView {
       constructor(leaf, plugin) {
         super(leaf);
@@ -343,7 +347,7 @@ var require_terminal_view = __commonJS({
         return { cwd: this.cwd };
       }
       async setState(state, result) {
-        if (state && state.cwd && !this.session) this.startSession(state.cwd, state.command);
+        if (state && state.cwd && !this.session) this.startSession(state.cwd, state.command, state.env);
         await super.setState(state, result);
       }
       async onOpen() {
@@ -353,10 +357,10 @@ var require_terminal_view = __commonJS({
           if (!this.session) this.startSession(this.plugin.getVaultPath());
         }, 150);
       }
-      startSession(cwd, command) {
+      startSession(cwd, command, env) {
         if (!cwd) return;
         this.cwd = cwd;
-        this.session = new TerminalSession(this.plugin, { cwd, command });
+        this.session = new TerminalSession2(this.plugin, { cwd, command, env });
         this.session.onReveal = () => {
           this.app.workspace.revealLeaf(this.leaf);
           this.app.workspace.setActiveLeaf(this.leaf, { focus: true });
@@ -468,7 +472,7 @@ var require_block_sessions = __commonJS({
     var { TFile: TFile2 } = require("obsidian");
     var path2 = require("path");
     var { BLOCK_LANG: BLOCK_LANG2 } = require_constants();
-    var { TerminalSession } = require_terminal_session();
+    var { TerminalSession: TerminalSession2 } = require_terminal_session();
     var { TerminalBlockChild } = require_terminal_block();
     function parseBlockOptions(source) {
       const opts = {};
@@ -489,21 +493,24 @@ var require_block_sessions = __commonJS({
       return "```" + BLOCK_LANG2 + "\nid: " + newBlockId() + "\n```";
     }
     var BlockSessions2 = class {
-      constructor(plugin) {
+      constructor(plugin, { language = BLOCK_LANG2, createSession } = {}) {
         this.plugin = plugin;
+        this.language = language;
+        this.createSession = createSession || ((opts, ctx) => new TerminalSession2(this.plugin, {
+          cwd: this.resolveCwd(opts.cwd, ctx.sourcePath),
+          command: opts.command
+        }));
         this.sessions = /* @__PURE__ */ new Map();
         this.orphanTimers = /* @__PURE__ */ new Map();
       }
-      /** Markdown code block processor for ```terminal. */
-      process(source, el, ctx) {
+      /** Markdown code block processor for a terminal-like block. */
+      async process(source, el, ctx) {
         const opts = parseBlockOptions(source);
         const key = blockKey(source, ctx.sourcePath);
         let session = this.sessions.get(key);
         if (!session || session.disposed) {
-          session = new TerminalSession(this.plugin, {
-            cwd: this.resolveCwd(opts.cwd, ctx.sourcePath),
-            command: opts.command
-          });
+          session = await this.createSession(opts, ctx, source);
+          if (!session) return;
           this.sessions.set(key, session);
         }
         ctx.addChild(new TerminalBlockChild(el, this, session, key, ctx.sourcePath));
@@ -540,6 +547,7 @@ var require_block_sessions = __commonJS({
                 return;
               }
             }
+            if (keys === null) return;
             if (!keys.has(key) && !session.isAttached()) {
               session.dispose();
               this.sessions.delete(key);
@@ -550,11 +558,15 @@ var require_block_sessions = __commonJS({
       keysInFile(content, file) {
         let texts = [content];
         if (file.extension === "canvas") {
-          const data = JSON.parse(content);
-          texts = (data.nodes || []).filter((n) => n.type === "text").map((n) => n.text || "");
+          try {
+            const data = JSON.parse(content);
+            texts = (data.nodes || []).filter((n) => n.type === "text").map((n) => n.text || "");
+          } catch {
+            return null;
+          }
         }
         const keys = /* @__PURE__ */ new Set();
-        const fence = new RegExp("^(`{3,}|~{3,})[ \\t]*" + BLOCK_LANG2 + "[ \\t]*\\r?\\n([\\s\\S]*?)^\\1[ \\t]*$", "gm");
+        const fence = new RegExp("^(`{3,}|~{3,})[ \\t]*" + this.language + "[ \\t]*\\r?\\n([\\s\\S]*?)^\\1[ \\t]*$", "gm");
         for (const text of texts) {
           for (const m of text.matchAll(fence)) keys.add(blockKey(m[2], file.path));
         }
@@ -571,22 +583,100 @@ var require_block_sessions = __commonJS({
   }
 });
 
+// src/pi-harness.js
+var require_pi_harness = __commonJS({
+  "src/pi-harness.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var HARNESS_LANGUAGE2 = "pi-harness";
+    var SUPPORTED_AGENT = "pi";
+    var SUPPORTED_BRIDGE = "open-terminal";
+    var HARNESS_FENCE = new RegExp("^\\s*```" + HARNESS_LANGUAGE2 + "[ \\t]*\\r?\\n([\\s\\S]*?)\\r?\\n```\\s*$");
+    function newPiHarnessId() {
+      const suffix = typeof crypto2.randomUUID === "function" ? crypto2.randomUUID() : crypto2.randomBytes(16).toString("hex");
+      return `pi-${suffix}`;
+    }
+    function createPiHarnessMarkdown(id = newPiHarnessId()) {
+      return `\`\`\`${HARNESS_LANGUAGE2}
+id: ${id}
+agent: ${SUPPORTED_AGENT}
+bridge: ${SUPPORTED_BRIDGE}
+\`\`\``;
+    }
+    function parsePiHarnessNode2(text) {
+      const match = typeof text === "string" ? text.match(HARNESS_FENCE) : null;
+      if (!match) return invalid("The node must contain a pi-harness code block.");
+      const values = {};
+      const errors = [];
+      for (const line of match[1].split(/\r?\n/)) {
+        if (!line.trim()) continue;
+        const field = line.match(/^\s*([A-Za-z]+)\s*:\s*(.*?)\s*$/);
+        if (!field) {
+          errors.push(`Invalid harness field: ${line}`);
+          continue;
+        }
+        const key = field[1].toLowerCase();
+        if (Object.prototype.hasOwnProperty.call(values, key)) {
+          errors.push(`Duplicate harness field: ${key}`);
+          continue;
+        }
+        values[key] = field[2];
+      }
+      if (!values.id) errors.push("Harness ID is required.");
+      if (!values.agent) errors.push("Harness agent is required.");
+      else if (values.agent !== SUPPORTED_AGENT) errors.push(`Unsupported agent "${values.agent}".`);
+      if (values.bridge && values.bridge !== SUPPORTED_BRIDGE) errors.push(`Unsupported bridge "${values.bridge}".`);
+      if (errors.length) return { valid: false, harness: null, errors };
+      return {
+        valid: true,
+        harness: { id: values.id, agent: values.agent, bridge: values.bridge || null },
+        errors: []
+      };
+    }
+    function invalid(error) {
+      return { valid: false, harness: null, errors: [error] };
+    }
+    function findDuplicateHarnessIds2(nodes) {
+      const nodeIdsByHarnessId = /* @__PURE__ */ new Map();
+      for (const node of nodes || []) {
+        if (!node || node.type !== "text") continue;
+        const declaration = parsePiHarnessNode2(node.text);
+        if (!declaration.valid) continue;
+        const nodeIds = nodeIdsByHarnessId.get(declaration.harness.id) || [];
+        nodeIds.push(node.id);
+        nodeIdsByHarnessId.set(declaration.harness.id, nodeIds);
+      }
+      return [...nodeIdsByHarnessId].filter(([, nodeIds]) => nodeIds.length > 1).map(([harnessId, nodeIds]) => ({ harnessId, nodeIds }));
+    }
+    module2.exports = {
+      HARNESS_LANGUAGE: HARNESS_LANGUAGE2,
+      SUPPORTED_AGENT,
+      SUPPORTED_BRIDGE,
+      createPiHarnessMarkdown,
+      findDuplicateHarnessIds: findDuplicateHarnessIds2,
+      newPiHarnessId,
+      parsePiHarnessNode: parsePiHarnessNode2
+    };
+  }
+});
+
 // src/canvas.js
 var require_canvas = __commonJS({
   "src/canvas.js"(exports2, module2) {
     "use strict";
     var { ItemView, Notice: Notice2 } = require("obsidian");
     var { newBlockMarkdown: newBlockMarkdown2 } = require_block_sessions();
+    var { createPiHarnessMarkdown } = require_pi_harness();
     function getActiveCanvas2(app) {
       const view = app.workspace.getActiveViewOfType(ItemView);
       return view && view.getViewType() === "canvas" && view.canvas ? view.canvas : null;
     }
     function addTerminalToCanvas2(canvas) {
-      if (typeof canvas.createTextNode !== "function") {
+      if (!canCreateTextNodes(canvas)) {
         new Notice2("This Obsidian version doesn't allow plugins to create cards. Create a text card with a ```terminal block instead.");
         return;
       }
-      const center = typeof canvas.posCenter === "function" ? canvas.posCenter() : { x: 0, y: 0 };
+      const center = canvasCenter(canvas);
       canvas.createTextNode({
         pos: center,
         position: "center",
@@ -597,7 +687,28 @@ var require_canvas = __commonJS({
       });
       if (typeof canvas.requestSave === "function") canvas.requestSave();
     }
-    module2.exports = { getActiveCanvas: getActiveCanvas2, addTerminalToCanvas: addTerminalToCanvas2 };
+    function addPiHarnessToCanvas2(canvas) {
+      if (!canCreateTextNodes(canvas)) {
+        new Notice2("This Obsidian version doesn't allow plugins to create cards. Create a text card with a pi-harness block instead.");
+        return;
+      }
+      canvas.createTextNode({
+        pos: canvasCenter(canvas),
+        position: "center",
+        size: { width: 640, height: 380 },
+        text: createPiHarnessMarkdown(),
+        focus: false,
+        save: true
+      });
+      if (typeof canvas.requestSave === "function") canvas.requestSave();
+    }
+    function canCreateTextNodes(canvas) {
+      return typeof canvas.createTextNode === "function";
+    }
+    function canvasCenter(canvas) {
+      return typeof canvas.posCenter === "function" ? canvas.posCenter() : { x: 0, y: 0 };
+    }
+    module2.exports = { getActiveCanvas: getActiveCanvas2, addPiHarnessToCanvas: addPiHarnessToCanvas2, addTerminalToCanvas: addTerminalToCanvas2 };
   }
 });
 
@@ -647,6 +758,12 @@ var require_settings_tab = __commonJS({
             await save();
           })
         );
+        new Setting(containerEl).setName("Pi executable").setDesc('Pi executable for managed Canvas harnesses. Leave empty to use "pi" from PATH.').addText(
+          (t) => t.setPlaceholder("pi").setValue(s.piPath).onChange(async (v) => {
+            s.piPath = v;
+            await save();
+          })
+        );
         new Setting(containerEl).setName("Font size").setDesc("Applies to terminals opened after the change.").addSlider(
           (sl) => sl.setLimits(9, 24, 1).setValue(s.fontSize).setDynamicTooltip().onChange(async (v) => {
             s.fontSize = v;
@@ -665,18 +782,367 @@ var require_settings_tab = __commonJS({
   }
 });
 
+// src/pi-bridge-installer.js
+var require_pi_bridge_installer = __commonJS({
+  "src/pi-bridge-installer.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var fs2 = require("fs/promises");
+    var path2 = require("path");
+    var BRIDGE_DIRECTORY = [".pi", "extensions", "open-terminal-canvas"];
+    var BRIDGE_FILENAME = "index.js";
+    var MANIFEST_FILENAME = "manifest.json";
+    var MANAGED_BY = "open-terminal-obsidian";
+    var PROTOCOL_VERSION = 1;
+    var BridgeModifiedError2 = class extends Error {
+      constructor(bridgePath) {
+        super(`The managed Pi bridge was modified and will not be overwritten: ${bridgePath}`);
+        this.name = "BridgeModifiedError";
+        this.bridgePath = bridgePath;
+      }
+    };
+    function sha256(content) {
+      return `sha256:${crypto2.createHash("sha256").update(content).digest("hex")}`;
+    }
+    async function readFileOrNull(filePath) {
+      try {
+        return await fs2.readFile(filePath, "utf8");
+      } catch (error) {
+        if (error && error.code === "ENOENT") return null;
+        throw error;
+      }
+    }
+    async function writeAtomically(filePath, content) {
+      const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+      await fs2.writeFile(temporaryPath, content, { encoding: "utf8", mode: 384 });
+      await fs2.rename(temporaryPath, filePath);
+    }
+    function parseManifest(content, manifestPath) {
+      if (!content) return null;
+      try {
+        return JSON.parse(content);
+      } catch {
+        throw new BridgeModifiedError2(manifestPath);
+      }
+    }
+    async function ensurePiBridgeInstalled2({ sourcePath, vaultPath, pluginVersion, force = false }) {
+      if (!sourcePath || !vaultPath || !pluginVersion) throw new Error("Bridge installation requires sourcePath, vaultPath, and pluginVersion.");
+      const source = await fs2.readFile(sourcePath, "utf8");
+      const sourceHash = sha256(source);
+      const extensionDir = path2.join(vaultPath, ...BRIDGE_DIRECTORY);
+      const bridgePath = path2.join(extensionDir, BRIDGE_FILENAME);
+      const manifestPath = path2.join(extensionDir, MANIFEST_FILENAME);
+      const currentBridge = await readFileOrNull(bridgePath);
+      const currentManifest = parseManifest(await readFileOrNull(manifestPath), manifestPath);
+      if (!force && currentBridge !== null) {
+        const currentHash = sha256(currentBridge);
+        const isManaged = currentManifest && currentManifest.managedBy === MANAGED_BY && typeof currentManifest.managedHash === "string" && currentManifest.managedHash === currentHash;
+        if (!isManaged) throw new BridgeModifiedError2(bridgePath);
+      }
+      const manifest = {
+        managedBy: MANAGED_BY,
+        pluginVersion,
+        protocolVersion: PROTOCOL_VERSION,
+        managedHash: sourceHash
+      };
+      const unchanged = currentBridge === source && currentManifest && JSON.stringify(currentManifest) === JSON.stringify(manifest);
+      if (unchanged) return { status: "current", bridgePath, manifestPath, manifest };
+      await fs2.mkdir(extensionDir, { recursive: true, mode: 448 });
+      await writeAtomically(bridgePath, source);
+      await writeAtomically(manifestPath, `${JSON.stringify(manifest, null, 2)}
+`);
+      return { status: currentBridge === null ? "installed" : "updated", bridgePath, manifestPath, manifest };
+    }
+    module2.exports = {
+      BRIDGE_DIRECTORY,
+      BridgeModifiedError: BridgeModifiedError2,
+      PROTOCOL_VERSION,
+      ensurePiBridgeInstalled: ensurePiBridgeInstalled2,
+      sha256
+    };
+  }
+});
+
+// src/pi-bridge-transport.js
+var require_pi_bridge_transport = __commonJS({
+  "src/pi-bridge-transport.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var fs2 = require("fs/promises");
+    var os = require("os");
+    var path2 = require("path");
+    var PROTOCOL_VERSION = 1;
+    var SESSION_DIRECTORY_NAME = "open-terminal-pi";
+    var MESSAGE_ID = /^msg-[A-Za-z0-9-]+$/;
+    var BridgeProtocolError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "BridgeProtocolError";
+      }
+    };
+    function randomId(prefix) {
+      const value = typeof crypto2.randomUUID === "function" ? crypto2.randomUUID() : crypto2.randomBytes(16).toString("hex");
+      return `${prefix}-${value}`;
+    }
+    async function createBridgeSession2({ temporaryRoot = os.tmpdir() } = {}) {
+      const sessionId = randomId("session");
+      const directory = path2.join(temporaryRoot, SESSION_DIRECTORY_NAME, sessionId);
+      const session = {
+        protocolVersion: PROTOCOL_VERSION,
+        sessionId,
+        bridgeToken: crypto2.randomBytes(32).toString("base64url"),
+        directory,
+        inboxDirectory: path2.join(directory, "inbox"),
+        processedDirectory: path2.join(directory, "processed"),
+        acknowledgementsDirectory: path2.join(directory, "acks"),
+        errorsDirectory: path2.join(directory, "errors"),
+        sessionPath: path2.join(directory, "session.json")
+      };
+      await Promise.all([
+        fs2.mkdir(session.inboxDirectory, { recursive: true, mode: 448 }),
+        fs2.mkdir(session.processedDirectory, { recursive: true, mode: 448 }),
+        fs2.mkdir(session.acknowledgementsDirectory, { recursive: true, mode: 448 }),
+        fs2.mkdir(session.errorsDirectory, { recursive: true, mode: 448 })
+      ]);
+      return session;
+    }
+    function createBridgeMessage2({ harnessId, bridgeToken, canvasPath, workingDirectory, sourceNodes, content, replyMode, metadata }) {
+      const message = {
+        version: PROTOCOL_VERSION,
+        id: randomId("msg"),
+        harnessId,
+        bridgeToken,
+        sourceNodes,
+        content,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      if (canvasPath) message.canvasPath = canvasPath;
+      if (workingDirectory) message.workingDirectory = workingDirectory;
+      if (replyMode) message.replyMode = replyMode;
+      if (metadata) message.metadata = metadata;
+      validateBridgeMessage(message);
+      return message;
+    }
+    function validateBridgeMessage(message, expected = {}) {
+      if (!message || typeof message !== "object") throw new BridgeProtocolError("Bridge message must be an object.");
+      if (message.version !== PROTOCOL_VERSION) throw new BridgeProtocolError(`Unsupported bridge protocol version "${message.version}".`);
+      for (const field of ["id", "harnessId", "bridgeToken", "content", "createdAt"]) {
+        if (typeof message[field] !== "string" || !message[field]) throw new BridgeProtocolError(`Bridge message field "${field}" is required.`);
+      }
+      if (!MESSAGE_ID.test(message.id)) throw new BridgeProtocolError("Bridge message ID is invalid.");
+      if (!Array.isArray(message.sourceNodes)) throw new BridgeProtocolError('Bridge message field "sourceNodes" must be an array.');
+      if (expected.harnessId && message.harnessId !== expected.harnessId) throw new BridgeProtocolError("Bridge message targets a different harness.");
+      if (expected.bridgeToken && message.bridgeToken !== expected.bridgeToken) throw new BridgeProtocolError("Bridge message token is not authorized for this session.");
+      return message;
+    }
+    async function writeBridgeMessage2(session, message) {
+      validateBridgeMessage(message, { bridgeToken: session.bridgeToken, harnessId: session.harnessId });
+      const messagePath = path2.join(session.inboxDirectory, `${message.id}.json`);
+      await writeJsonAtomically(messagePath, message);
+      return messagePath;
+    }
+    async function writeAcknowledgement(session, acknowledgement) {
+      validateAcknowledgement(acknowledgement, { harnessId: session.harnessId });
+      const acknowledgementPath = path2.join(session.acknowledgementsDirectory, `${acknowledgement.messageId}.json`);
+      await writeJsonAtomically(acknowledgementPath, acknowledgement);
+      return acknowledgementPath;
+    }
+    async function waitForAcknowledgement2(session, messageId, { timeoutMs = 1e4, pollIntervalMs = 100 } = {}) {
+      const acknowledgementPath = path2.join(session.acknowledgementsDirectory, `${messageId}.json`);
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() <= deadline) {
+        const content = await readFileOrNull(acknowledgementPath);
+        if (content !== null) {
+          let acknowledgement;
+          try {
+            acknowledgement = JSON.parse(content);
+          } catch {
+            throw new BridgeProtocolError(`Acknowledgement for "${messageId}" is not valid JSON.`);
+          }
+          return validateAcknowledgement(acknowledgement, { messageId, harnessId: session.harnessId });
+        }
+        await sleep(pollIntervalMs);
+      }
+      throw new BridgeProtocolError(`Timed out waiting for acknowledgement of "${messageId}".`);
+    }
+    function validateAcknowledgement(acknowledgement, expected = {}) {
+      if (!acknowledgement || acknowledgement.version !== PROTOCOL_VERSION) throw new BridgeProtocolError("Acknowledgement has an unsupported protocol version.");
+      for (const field of ["messageId", "harnessId", "status", "receivedAt"]) {
+        if (typeof acknowledgement[field] !== "string" || !acknowledgement[field]) throw new BridgeProtocolError(`Acknowledgement field "${field}" is required.`);
+      }
+      if (!MESSAGE_ID.test(acknowledgement.messageId)) throw new BridgeProtocolError("Acknowledgement message ID is invalid.");
+      if (!(/* @__PURE__ */ new Set(["accepted", "queued", "rejected", "failed"])).has(acknowledgement.status)) {
+        throw new BridgeProtocolError(`Unsupported acknowledgement status "${acknowledgement.status}".`);
+      }
+      if (expected.messageId && acknowledgement.messageId !== expected.messageId) throw new BridgeProtocolError("Acknowledgement belongs to a different message.");
+      if (expected.harnessId && acknowledgement.harnessId !== expected.harnessId) throw new BridgeProtocolError("Acknowledgement belongs to a different harness.");
+      return acknowledgement;
+    }
+    async function writeJsonAtomically(filePath, value) {
+      const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+      try {
+        await fs2.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}
+`, { encoding: "utf8", mode: 384 });
+        await fs2.rename(temporaryPath, filePath);
+      } catch (error) {
+        await fs2.rm(temporaryPath, { force: true });
+        throw error;
+      }
+    }
+    async function readFileOrNull(filePath) {
+      try {
+        return await fs2.readFile(filePath, "utf8");
+      } catch (error) {
+        if (error && error.code === "ENOENT") return null;
+        throw error;
+      }
+    }
+    function sleep(milliseconds) {
+      return new Promise((resolve) => setTimeout(resolve, milliseconds));
+    }
+    module2.exports = {
+      BridgeProtocolError,
+      PROTOCOL_VERSION,
+      createBridgeMessage: createBridgeMessage2,
+      createBridgeSession: createBridgeSession2,
+      validateAcknowledgement,
+      validateBridgeMessage,
+      waitForAcknowledgement: waitForAcknowledgement2,
+      writeAcknowledgement,
+      writeBridgeMessage: writeBridgeMessage2
+    };
+  }
+});
+
+// src/canvas-graph.js
+var require_canvas_graph = __commonJS({
+  "src/canvas-graph.js"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("crypto");
+    var path2 = require("path");
+    var CanvasGraphError = class extends Error {
+      constructor(message) {
+        super(message);
+        this.name = "CanvasGraphError";
+      }
+    };
+    function parseCanvasGraph2(content) {
+      let graph;
+      try {
+        graph = JSON.parse(content);
+      } catch {
+        throw new CanvasGraphError("The Canvas document is not valid JSON.");
+      }
+      if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) {
+        throw new CanvasGraphError("The Canvas document must contain nodes and edges arrays.");
+      }
+      return graph;
+    }
+    function getIncomingSourceNodes(graph, harnessNodeId, { allowFiles = false } = {}) {
+      const nodesById = /* @__PURE__ */ new Map();
+      for (const node of graph.nodes) {
+        if (!node || typeof node.id !== "string" || !node.id) throw new CanvasGraphError("Canvas nodes must have IDs.");
+        if (nodesById.has(node.id)) throw new CanvasGraphError(`Duplicate Canvas node ID "${node.id}".`);
+        nodesById.set(node.id, node);
+      }
+      if (!nodesById.has(harnessNodeId)) throw new CanvasGraphError(`Harness node "${harnessNodeId}" was not found.`);
+      const sources = [];
+      const includedNodeIds = /* @__PURE__ */ new Set();
+      for (const edge of graph.edges) {
+        if (!edge || typeof edge.fromNode !== "string" || typeof edge.toNode !== "string") {
+          throw new CanvasGraphError("Canvas edges must include fromNode and toNode IDs.");
+        }
+        if (!nodesById.has(edge.fromNode) || !nodesById.has(edge.toNode)) {
+          throw new CanvasGraphError(`Canvas edge "${edge.id || "unknown"}" references a missing node.`);
+        }
+        if (edge.toNode !== harnessNodeId || includedNodeIds.has(edge.fromNode)) continue;
+        const source = nodesById.get(edge.fromNode);
+        if (source.type === "text") {
+          if (typeof source.text !== "string") throw new CanvasGraphError(`Text source node "${source.id}" has no text content.`);
+          includedNodeIds.add(source.id);
+          sources.push({ id: source.id, type: source.type, title: sourceTitle(source), content: source.text });
+          continue;
+        }
+        if (source.type === "file" && allowFiles) {
+          includedNodeIds.add(source.id);
+          sources.push({ id: source.id, type: source.type, file: source.file, title: source.file || source.id, content: "" });
+          continue;
+        }
+        throw new CanvasGraphError(`Unsupported source node type "${source.type}" for node "${source.id}".`);
+      }
+      return sources;
+    }
+    async function resolveIncomingSourceNodes2(graph, harnessNodeId, readFile) {
+      if (typeof readFile !== "function") throw new CanvasGraphError("A vault file resolver is required for file Canvas nodes.");
+      const sources = getIncomingSourceNodes(graph, harnessNodeId, { allowFiles: true });
+      for (const source of sources) {
+        if (source.type !== "file") continue;
+        if (typeof source.file !== "string" || !source.file) throw new CanvasGraphError(`File source node "${source.id}" has no file path.`);
+        const content = await readFile(source.file);
+        if (typeof content !== "string") throw new CanvasGraphError(`File source node "${source.id}" could not be read.`);
+        source.content = content;
+        source.title = sourceTitle({ id: source.file, text: content }) || path2.basename(source.file);
+      }
+      return sources;
+    }
+    function buildCanvasMessageContent2(sources) {
+      if (!Array.isArray(sources) || sources.length === 0) throw new CanvasGraphError("No incoming Canvas nodes are connected to this Pi harness.");
+      const sections = ["The following content was sent from an Obsidian canvas, USE IT AS CONTEXT ONLY, DO NOT PERFORM ANY ACTIONS YET"];
+      const sourceNodes = sources.map((source) => ({
+        id: source.id,
+        type: source.type,
+        title: source.title,
+        contentHash: sha256(source.content)
+      }));
+      for (const source of sources) {
+        sections.push(`## Source: ${source.title}
+
+Canvas node: \`${source.id}\`
+
+${source.content}`);
+      }
+      sections.push("## Instructions\n\nTreat the sections above as context supplied by the user.");
+      return { content: sections.join("\n\n"), sourceNodes };
+    }
+    function messageFingerprint2(message) {
+      return sha256(JSON.stringify({ sourceNodes: message.sourceNodes, content: message.content }));
+    }
+    function sourceTitle(source) {
+      const firstLine = source.text.split(/\r?\n/).find((line) => line.trim());
+      if (!firstLine) return source.id;
+      const title = firstLine.replace(/^\s*#{1,6}\s+/, "").trim();
+      return title || source.id;
+    }
+    function sha256(content) {
+      return `sha256:${crypto2.createHash("sha256").update(content).digest("hex")}`;
+    }
+    module2.exports = { CanvasGraphError, buildCanvasMessageContent: buildCanvasMessageContent2, getIncomingSourceNodes, messageFingerprint: messageFingerprint2, parseCanvasGraph: parseCanvasGraph2, resolveIncomingSourceNodes: resolveIncomingSourceNodes2 };
+  }
+});
+
 // src/main.js
 var { Plugin, Notice, FileSystemAdapter, TFile, TFolder } = require("obsidian");
+var crypto = require("crypto");
+var fs = require("fs/promises");
 var path = require("path");
 var { VIEW_TYPE, BLOCK_LANG, DEFAULT_SETTINGS } = require_constants();
 var shell = require_shell();
 var { TerminalView } = require_terminal_view();
+var { TerminalSession } = require_terminal_session();
 var { BlockSessions, newBlockMarkdown } = require_block_sessions();
-var { getActiveCanvas, addTerminalToCanvas } = require_canvas();
+var { getActiveCanvas, addPiHarnessToCanvas, addTerminalToCanvas } = require_canvas();
 var { OpenTerminalSettingTab } = require_settings_tab();
+var { BridgeModifiedError, ensurePiBridgeInstalled } = require_pi_bridge_installer();
+var { createBridgeMessage, createBridgeSession, waitForAcknowledgement, writeBridgeMessage } = require_pi_bridge_transport();
+var { buildCanvasMessageContent, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes } = require_canvas_graph();
+var { findDuplicateHarnessIds, HARNESS_LANGUAGE, parsePiHarnessNode } = require_pi_harness();
 var OpenTerminalPlugin = class extends Plugin {
   async onload() {
     await this.loadSettings();
+    this.piHarnessSessions = /* @__PURE__ */ new Map();
+    this.autoDeliveryFingerprints = /* @__PURE__ */ new Map();
+    this.autoDeliveryTimers = /* @__PURE__ */ new Map();
+    this.registerEvent(this.app.vault.on("modify", (file) => this.scheduleAutoDelivery(file)));
     this.registerView(VIEW_TYPE, (leaf) => new TerminalView(leaf, this));
     this.addRibbonIcon("terminal-square", "Open terminal", () => {
       this.openTerminal(this.getVaultPath());
@@ -703,10 +1169,32 @@ var OpenTerminalPlugin = class extends Plugin {
         menu.addItem(
           (item) => item.setTitle("Open in terminal").setIcon("terminal-square").onClick(() => this.openTerminal(this.getAbsolutePath(folder)))
         );
+        if (!(file instanceof TFile) || file.extension !== "canvas") return;
+        menu.addItem(
+          (item) => item.setTitle("Add harness").setIcon("bot").onClick(async () => {
+            await this.app.workspace.getLeaf(false).openFile(file);
+            const canvas = getActiveCanvas(this.app);
+            if (canvas) addPiHarnessToCanvas(canvas);
+          })
+        );
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("canvas-menu", (menu, canvas) => {
+        const targetCanvas = canvas || getActiveCanvas(this.app);
+        if (!targetCanvas) return;
+        menu.addItem(
+          (item) => item.setTitle("Add harness").setIcon("bot").onClick(() => addPiHarnessToCanvas(targetCanvas))
+        );
       })
     );
     this.blocks = new BlockSessions(this);
     this.registerMarkdownCodeBlockProcessor(BLOCK_LANG, (source, el, ctx) => this.blocks.process(source, el, ctx));
+    this.piHarnessBlocks = new BlockSessions(this, {
+      language: HARNESS_LANGUAGE,
+      createSession: (_opts, ctx, source) => this.createEmbeddedPiHarnessSession(source, ctx.sourcePath)
+    });
+    this.registerMarkdownCodeBlockProcessor(HARNESS_LANGUAGE, (source, el, ctx) => this.piHarnessBlocks.process(source, el, ctx));
     this.addCommand({
       id: "insert-terminal-block",
       name: "Insert terminal into note",
@@ -722,10 +1210,33 @@ var OpenTerminalPlugin = class extends Plugin {
         return true;
       }
     });
+    this.addCommand({
+      id: "create-pi-harness-on-canvas",
+      name: "Create Pi harness on Canvas",
+      checkCallback: (checking) => {
+        const canvas = getActiveCanvas(this.app);
+        if (!canvas) return false;
+        if (!checking) addPiHarnessToCanvas(canvas);
+        return true;
+      }
+    });
+    this.addCommand({
+      id: "install-pi-bridge",
+      name: "Install Open Terminal Pi bridge",
+      callback: () => this.installPiBridge()
+    });
+    this.addCommand({
+      id: "reinstall-pi-bridge",
+      name: "Reinstall Open Terminal Pi bridge (overwrite local changes)",
+      callback: () => this.installPiBridge({ force: true })
+    });
     this.addSettingTab(new OpenTerminalSettingTab(this.app, this));
   }
   onunload() {
     this.blocks.disposeAll();
+    this.piHarnessBlocks.disposeAll();
+    for (const timer of this.autoDeliveryTimers.values()) clearTimeout(timer);
+    this.autoDeliveryTimers.clear();
   }
   /**
    * Public API for other plugins: opens a terminal and runs a command.
@@ -751,7 +1262,7 @@ var OpenTerminalPlugin = class extends Plugin {
     const views = this.app.workspace.getLeavesOfType(VIEW_TYPE).map((l) => l.view).filter((v) => v instanceof TerminalView).reverse();
     return [...views, ...this.blocks.visible()];
   }
-  async openTerminal(cwd, command) {
+  async openTerminal(cwd, command, env) {
     if (!cwd) {
       new Notice("Could not determine the folder path.");
       return;
@@ -768,9 +1279,145 @@ var OpenTerminalPlugin = class extends Plugin {
       default:
         leaf = workspace.getLeaf("split", "horizontal");
     }
-    await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { cwd, command } });
+    await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { cwd, command, env } });
     workspace.revealLeaf(leaf);
     return leaf.view;
+  }
+  async installPiBridge({ force = false } = {}) {
+    const vaultPath = this.getVaultPath();
+    if (!vaultPath) {
+      new Notice("Could not determine the vault path for Pi bridge installation.");
+      return null;
+    }
+    try {
+      const result = await ensurePiBridgeInstalled({
+        sourcePath: path.join(this.pluginDir(), "bridge", "open-terminal-canvas.js"),
+        vaultPath,
+        pluginVersion: this.manifest.version,
+        force
+      });
+      const action = result.status === "current" ? "is already current" : `${result.status} successfully`;
+      new Notice(`Open Terminal Pi bridge ${action}.`);
+      return result;
+    } catch (error) {
+      if (error instanceof BridgeModifiedError) {
+        new Notice("The Open Terminal Pi bridge has local changes. Use the reinstall command to overwrite it.");
+        return null;
+      }
+      new Notice(`Could not install the Open Terminal Pi bridge: ${error.message}`);
+      return null;
+    }
+  }
+  scheduleAutoDelivery(file) {
+    if (!(file instanceof TFile) || file.extension !== "canvas") return;
+    clearTimeout(this.autoDeliveryTimers.get(file.path));
+    this.autoDeliveryTimers.set(file.path, setTimeout(() => {
+      this.autoDeliveryTimers.delete(file.path);
+      void this.autoDeliverCanvasChanges(file);
+    }, 750));
+  }
+  async resolveCanvasSources(graph, harnessNodeId) {
+    return resolveIncomingSourceNodes(graph, harnessNodeId, async (sourcePath) => {
+      const file = this.app.vault.getAbstractFileByPath(sourcePath);
+      if (!(file instanceof TFile)) throw new Error(`Referenced Canvas file "${sourcePath}" was not found in the vault.`);
+      return this.app.vault.cachedRead(file);
+    });
+  }
+  async autoDeliverCanvasChanges(file) {
+    let graph;
+    try {
+      graph = parseCanvasGraph(await this.app.vault.cachedRead(file));
+      if (findDuplicateHarnessIds(graph.nodes).length) return;
+    } catch {
+      return;
+    }
+    for (const node of graph.nodes.filter((candidate) => candidate.type === "text")) {
+      const declaration = parsePiHarnessNode(node.text);
+      if (!declaration.valid) continue;
+      const harnessId = declaration.harness.id;
+      const bridge = this.piHarnessSessions.get(harnessId);
+      if (!bridge || !await this.isPiHarnessRegistered(harnessId)) continue;
+      try {
+        const sources = await this.resolveCanvasSources(graph, node.id);
+        if (sources.length === 0) {
+          this.autoDeliveryFingerprints.set(`${file.path}:${harnessId}`, null);
+          continue;
+        }
+        const assembled = buildCanvasMessageContent(sources);
+        const key = `${file.path}:${harnessId}`;
+        const fingerprint = messageFingerprint(assembled);
+        if (this.autoDeliveryFingerprints.get(key) === fingerprint) continue;
+        this.autoDeliveryFingerprints.set(key, fingerprint);
+        const message = createBridgeMessage({
+          harnessId,
+          bridgeToken: bridge.bridgeToken,
+          canvasPath: file.path,
+          workingDirectory: this.getVaultPath(),
+          sourceNodes: assembled.sourceNodes,
+          content: assembled.content
+        });
+        await writeBridgeMessage(bridge, message);
+        const acknowledgement = await waitForAcknowledgement(bridge, message.id);
+        new Notice(`Pi harness ${harnessId}: ${acknowledgement.status}.`);
+      } catch (error) {
+        this.autoDeliveryFingerprints.delete(`${file.path}:${harnessId}`);
+        new Notice(`Could not auto-send Canvas data to Pi: ${error.message}`);
+      }
+    }
+  }
+  /** Creates the live Pi terminal rendered inside a pi-harness Canvas card. */
+  async createEmbeddedPiHarnessSession(source, sourcePath) {
+    const declaration = parsePiHarnessNode(`\`\`\`${HARNESS_LANGUAGE}
+${source}
+\`\`\``);
+    if (!declaration.valid) {
+      new Notice(`Invalid Pi harness: ${declaration.errors.join(" ")}`);
+      return null;
+    }
+    const harnessId = declaration.harness.id;
+    const existing = this.piHarnessSessions.get(harnessId);
+    if (existing && existing.terminal && !existing.terminal.disposed) return existing.terminal;
+    if (!await this.installPiBridge()) return null;
+    const bridge = await createBridgeSession();
+    bridge.harnessId = harnessId;
+    const vaultPath = this.getVaultPath();
+    const env = {
+      OPEN_TERMINAL_VAULT_ID: crypto.createHash("sha256").update(vaultPath).digest("hex"),
+      OPEN_TERMINAL_HARNESS_ID: harnessId,
+      OPEN_TERMINAL_BRIDGE_DIR: bridge.directory,
+      OPEN_TERMINAL_BRIDGE_TOKEN: bridge.bridgeToken,
+      OPEN_TERMINAL_PROTOCOL_VERSION: String(bridge.protocolVersion)
+    };
+    const executable = this.settings.piPath.trim() || "pi";
+    const terminal = new TerminalSession(this, { cwd: vaultPath, command: this.quoteArg(executable), env });
+    bridge.terminal = terminal;
+    this.piHarnessSessions.set(harnessId, bridge);
+    if (sourcePath) void this.baselineAutoDelivery(sourcePath, harnessId);
+    return terminal;
+  }
+  async baselineAutoDelivery(sourcePath, harnessId) {
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile) || file.extension !== "canvas") return;
+    try {
+      const graph = parseCanvasGraph(await this.app.vault.cachedRead(file));
+      const node = graph.nodes.find((candidate) => {
+        const declaration = candidate.type === "text" && parsePiHarnessNode(candidate.text);
+        return declaration && declaration.valid && declaration.harness.id === harnessId;
+      });
+      const sources = node ? await this.resolveCanvasSources(graph, node.id) : [];
+      this.autoDeliveryFingerprints.set(`${file.path}:${harnessId}`, sources.length ? messageFingerprint(buildCanvasMessageContent(sources)) : null);
+    } catch {
+    }
+  }
+  async isPiHarnessRegistered(harnessId) {
+    const session = this.piHarnessSessions.get(harnessId);
+    if (!session) return false;
+    try {
+      const registration = JSON.parse(await fs.readFile(session.sessionPath, "utf8"));
+      return registration.protocolVersion === session.protocolVersion && registration.harnessId === harnessId;
+    } catch {
+      return false;
+    }
   }
   loadXterm() {
     if (!this.xterm) {
