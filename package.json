@@ -5,7 +5,8 @@
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs",
-    "dev": "node esbuild.config.mjs --watch"
+    "dev": "node esbuild.config.mjs --watch",
+    "test": "node --test"
   },
   "keywords": [],
   "type": "commonjs",
