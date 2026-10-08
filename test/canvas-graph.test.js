@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { CanvasGraphError, buildCanvasMessageContent, getIncomingSourceNodes, parseCanvasGraph, resolveIncomingSourceNodes } = require("../src/canvas-graph");
+const { CanvasGraphError, buildCanvasMessageContent, getIncomingSourceNodes, getOutgoingTargets, parseCanvasGraph, resolveIncomingSourceNodes, resolveOutgoingTarget } = require("../src/canvas-graph");
 
 const graph = parseCanvasGraph(JSON.stringify({
   nodes: [
@@ -61,6 +61,29 @@ test("rejects invalid edge references and unsupported source nodes", () => {
     nodes: [{ id: "group", type: "group" }, { id: "pi-main", type: "text", text: "" }],
     edges: [{ id: "group-edge", fromNode: "group", toNode: "pi-main" }],
   })), "pi-main"), /Unsupported source node type "group"/);
+});
+
+test("resolves only direct outgoing text and file targets", () => {
+  const outgoing = parseCanvasGraph(JSON.stringify({
+    nodes: [
+      { id: "pi-main", type: "text", text: "harness" },
+      { id: "answer", type: "text", text: "draft" },
+      { id: "result", type: "file", file: "docs/result.md" },
+      { id: "indirect", type: "text", text: "not allowed" },
+    ],
+    edges: [
+      { id: "answer-edge", fromNode: "pi-main", toNode: "answer" },
+      { id: "file-edge", fromNode: "pi-main", toNode: "result" },
+      { id: "indirect-edge", fromNode: "answer", toNode: "indirect" },
+    ],
+  }));
+
+  assert.deepEqual(getOutgoingTargets(outgoing, "pi-main").map(({ id, type, file }) => ({ id, type, file })), [
+    { id: "answer", type: "text", file: null },
+    { id: "result", type: "file", file: "docs/result.md" },
+  ]);
+  assert.equal(resolveOutgoingTarget(outgoing, "pi-main", "answer").type, "text");
+  assert.throws(() => resolveOutgoingTarget(outgoing, "pi-main", "indirect"), /direct outgoing target/);
 });
 
 test("rejects malformed Canvas JSON", () => {

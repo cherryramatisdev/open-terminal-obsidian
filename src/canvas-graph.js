@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const path = require("path");
+const { parsePiHarnessNode } = require("./pi-harness");
 
 class CanvasGraphError extends Error {
   constructor(message) {
@@ -61,6 +62,49 @@ function getIncomingSourceNodes(graph, harnessNodeId, { allowFiles = false } = {
   return sources;
 }
 
+function getOutgoingTargets(graph, harnessNodeId) {
+  const nodesById = indexNodes(graph);
+  if (!nodesById.has(harnessNodeId)) throw new CanvasGraphError(`Harness node "${harnessNodeId}" was not found.`);
+
+  const targets = [];
+  for (const edge of graph.edges) {
+    if (edge.fromNode !== harnessNodeId) continue;
+    const node = nodesById.get(edge.toNode);
+    if (!node) throw new CanvasGraphError(`Canvas edge "${edge.id || "unknown"}" references a missing node.`);
+    if (node.type === "text") {
+      if (typeof node.text !== "string") throw new CanvasGraphError(`Text target node "${node.id}" has no text content.`);
+      if (parsePiHarnessNode(node.text).valid) throw new CanvasGraphError(`Pi harness node "${node.id}" cannot be a write target.`);
+      targets.push({ id: node.id, type: "text", label: sourceTitle(node), file: null });
+    } else if (node.type === "file") {
+      if (typeof node.file !== "string" || !node.file) throw new CanvasGraphError(`File target node "${node.id}" has no file path.`);
+      targets.push({ id: node.id, type: "file", label: node.file, file: node.file });
+    } else {
+      throw new CanvasGraphError(`Unsupported target node type "${node.type}" for node "${node.id}".`);
+    }
+  }
+  return targets;
+}
+
+function resolveOutgoingTarget(graph, harnessNodeId, targetNodeId) {
+  const target = getOutgoingTargets(graph, harnessNodeId).find((candidate) => candidate.id === targetNodeId);
+  if (!target) throw new CanvasGraphError(`Canvas node "${targetNodeId}" is not a direct outgoing target of harness "${harnessNodeId}".`);
+  return target;
+}
+
+function indexNodes(graph) {
+  const nodesById = new Map();
+  for (const node of graph.nodes) {
+    if (!node || typeof node.id !== "string" || !node.id) throw new CanvasGraphError("Canvas nodes must have IDs.");
+    if (nodesById.has(node.id)) throw new CanvasGraphError(`Duplicate Canvas node ID "${node.id}".`);
+    nodesById.set(node.id, node);
+  }
+  for (const edge of graph.edges) {
+    if (!edge || typeof edge.fromNode !== "string" || typeof edge.toNode !== "string") throw new CanvasGraphError("Canvas edges must include fromNode and toNode IDs.");
+    if (!nodesById.has(edge.fromNode) || !nodesById.has(edge.toNode)) throw new CanvasGraphError(`Canvas edge "${edge.id || "unknown"}" references a missing node.`);
+  }
+  return nodesById;
+}
+
 async function resolveIncomingSourceNodes(graph, harnessNodeId, readFile) {
   if (typeof readFile !== "function") throw new CanvasGraphError("A vault file resolver is required for file Canvas nodes.");
   const sources = getIncomingSourceNodes(graph, harnessNodeId, { allowFiles: true });
@@ -108,4 +152,4 @@ function sha256(content) {
   return `sha256:${crypto.createHash("sha256").update(content).digest("hex")}`;
 }
 
-module.exports = { CanvasGraphError, buildCanvasMessageContent, getIncomingSourceNodes, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes };
+module.exports = { CanvasGraphError, buildCanvasMessageContent, getIncomingSourceNodes, getOutgoingTargets, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes, resolveOutgoingTarget };
