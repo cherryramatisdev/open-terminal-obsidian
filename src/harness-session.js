@@ -3,8 +3,8 @@
 const fsp = require("fs/promises");
 const path = require("path");
 const { TFile } = require("obsidian");
-const { createBridgeMessage, waitForAcknowledgement, writeBridgeMessage, validateCanvasWriteOperation, writeCanvasWriteAcknowledgement } = require("./harness-transport");
-const { getIncomingSourceNodes, getOutgoingTargets, messageFingerprint, buildCanvasMessageContent, parseCanvasGraph, resolveIncomingSourceNodes } = require("./canvas-graph");
+const { validateCanvasWriteOperation, writeCanvasWriteAcknowledgement } = require("./harness-transport");
+const { contextFingerprint, parseCanvasGraph } = require("./canvas-graph");
 const { TerminalSession } = require("./terminal-session");
 const { writeCanvasOrVaultTarget } = require("./canvas-writer");
 
@@ -18,7 +18,8 @@ class HarnessSession {
     this.harnessId = harnessId;
     this.canvasPath = canvasPath;
     this.harnessNodeId = harnessNodeId;
-    this.fingerprint = null;
+    this.contextVersion = null;
+    this.stateSync = Promise.resolve();
     this.writeProcessing = Promise.resolve();
     this.writeTimer = null;
     this.onDispose = null;
@@ -33,49 +34,27 @@ class HarnessSession {
     return this.terminal;
   }
 
-  async deliver(graph) {
-    if (this.disposed || !(await this.isRegistered())) return;
-    await this.syncConnections(graph);
-    const sources = await resolveIncomingSourceNodes(graph, this.harnessNodeId, async (sourcePath) => {
-      const file = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
-      if (!(file instanceof TFile)) throw new Error(`Referenced Canvas file "${sourcePath}" was not found in the vault.`);
-      return this.plugin.app.vault.cachedRead(file);
+  /**
+   * Mirrors the live Canvas graph for the Pi side tools. No node content is resolved, staged,
+   * or pushed here: `read_context` reads the graph and the vault itself when the model asks.
+   */
+  syncState(graph) {
+    this.stateSync = this.stateSync.catch(() => {}).then(async () => {
+      if (this.disposed) return;
+      const contextVersion = contextFingerprint(graph);
+      if (this.contextVersion === contextVersion) return;
+      await writeJsonAtomically(this.bridge.canvasStatePath, {
+        protocolVersion: this.bridge.protocolVersion,
+        harnessId: this.harnessId,
+        canvasPath: this.canvasPath,
+        harnessNodeId: this.harnessNodeId,
+        contextVersion,
+        capturedAt: new Date().toISOString(),
+        graph: { nodes: graph.nodes, edges: graph.edges },
+      });
+      this.contextVersion = contextVersion;
     });
-    if (sources.length === 0) {
-      this.fingerprint = null;
-      return;
-    }
-    const assembled = buildCanvasMessageContent(sources);
-    const fingerprint = messageFingerprint(assembled);
-    if (this.fingerprint === fingerprint) return;
-    this.fingerprint = fingerprint;
-    const message = createBridgeMessage({
-      harnessId: this.harnessId,
-      bridgeToken: this.bridge.bridgeToken,
-      canvasPath: this.canvasPath,
-      workingDirectory: this.plugin.getVaultPath(),
-      sourceNodes: assembled.sourceNodes,
-      content: assembled.content,
-    });
-    const acknowledgement = await writeBridgeMessage(this.bridge, message).then(() => waitForAcknowledgement(this.bridge, message.id));
-    this.plugin.notify(`Harness ${this.harnessId}: ${acknowledgement.status}.`);
-  }
-
-  async syncConnections(graph) {
-    const { connections } = resolveConnectionState(graph, this.harnessNodeId);
-    await writeJsonAtomically(path.join(this.bridge.directory, "connections.json"), connections);
-  }
-
-  async isRegistered() {
-    try {
-      const registration = JSON.parse(await fsp.readFile(this.bridge.sessionPath, "utf8"));
-      return registration.protocolVersion === this.bridge.protocolVersion &&
-        registration.harnessId === this.harnessId &&
-        registration.canvasPath === this.canvasPath &&
-        registration.harnessNodeId === this.harnessNodeId;
-    } catch {
-      return false;
-    }
+    return this.stateSync;
   }
 
   async processWrites() {
@@ -145,13 +124,10 @@ async function createHarnessSession({ plugin, provider, bridge, graph, key, harn
   if (!(file instanceof TFile)) throw new Error(`Canvas file "${canvasPath}" was not found in the vault.`);
   // The caller resolves the node from the live Canvas document, which runs ahead of the saved file.
   const canvasGraph = graph || parseCanvasGraph(await plugin.app.vault.cachedRead(file));
-  const { targets, connections } = resolveConnectionState(canvasGraph, harnessNodeId);
-  bridge.targets = targets;
-  bridge.connections = connections;
-  await writeJsonAtomically(path.join(bridge.directory, "connections.json"), connections);
   const launch = provider.createLaunchSpec({ bridge, vaultPath: plugin.getVaultPath() });
   const terminal = new TerminalSession(plugin, launch);
   const session = new HarnessSession({ plugin, provider, bridge, terminal, key, harnessId, canvasPath, harnessNodeId });
+  await session.syncState(canvasGraph);
   terminal.onDispose = () => session.dispose();
   bridge.session = session;
   return session;
@@ -161,28 +137,6 @@ async function writeJsonAtomically(filePath, value) {
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
   await fsp.rename(temporaryPath, filePath);
-}
-
-function resolveConnectionState(graph, harnessNodeId) {
-  const targets = getOutgoingTargets(graph, harnessNodeId);
-  return { targets, connections: buildConnections(graph, harnessNodeId, targets) };
-}
-
-function buildConnections(graph, harnessNodeId, targets) {
-  const incoming = getIncomingSourceNodes(graph, harnessNodeId, { allowFiles: true });
-  const connections = incoming.map((node) => ({
-    id: node.id,
-    type: node.type,
-    label: node.title,
-    file: node.file || null,
-    directions: ["incoming"],
-  }));
-  for (const target of targets) {
-    const existing = connections.find((node) => node.id === target.id);
-    if (existing) existing.directions.push("outgoing");
-    else connections.push({ id: target.id, type: target.type, label: target.label, file: target.file, directions: ["outgoing"] });
-  }
-  return connections;
 }
 
 module.exports = { HarnessSession, createHarnessSession };

@@ -21,7 +21,7 @@ class OpenTerminalPlugin extends Plugin {
     this.harnesses = new HarnessManager(this, new HarnessProviderRegistry([
       new PiHarnessProvider(this),
     ]));
-    this.registerEvent(this.app.vault.on("modify", (file) => this.harnesses.scheduleDelivery(file)));
+    this.registerEvent(this.app.vault.on("modify", (file) => this.harnesses.scheduleSync(file)));
 
     this.registerView(VIEW_TYPE, (leaf) => new TerminalView(leaf, this));
     this.addRibbonIcon("terminal-square", "Open terminal", () => this.openTerminal(this.getVaultPath()));
