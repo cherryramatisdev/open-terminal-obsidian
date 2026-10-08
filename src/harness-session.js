@@ -5,7 +5,7 @@ const path = require("path");
 const { TFile } = require("obsidian");
 const { createBridgeMessage, waitForAcknowledgement, writeBridgeMessage, validateCanvasWriteOperation, writeCanvasWriteAcknowledgement } = require("./harness-transport");
 const { getIncomingSourceNodes, getOutgoingTargets, messageFingerprint, buildCanvasMessageContent, parseCanvasGraph, resolveIncomingSourceNodes } = require("./canvas-graph");
-const TerminalSession = require("./terminal-session");
+const { TerminalSession } = require("./terminal-session");
 const { writeCanvasOrVaultTarget } = require("./canvas-writer");
 
 class HarnessSession {
@@ -35,6 +35,7 @@ class HarnessSession {
 
   async deliver(graph) {
     if (this.disposed || !(await this.isRegistered())) return;
+    await this.syncConnections(graph);
     const sources = await resolveIncomingSourceNodes(graph, this.harnessNodeId, async (sourcePath) => {
       const file = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
       if (!(file instanceof TFile)) throw new Error(`Referenced Canvas file "${sourcePath}" was not found in the vault.`);
@@ -58,6 +59,11 @@ class HarnessSession {
     });
     const acknowledgement = await writeBridgeMessage(this.bridge, message).then(() => waitForAcknowledgement(this.bridge, message.id));
     this.plugin.notify(`Harness ${this.harnessId}: ${acknowledgement.status}.`);
+  }
+
+  async syncConnections(graph) {
+    const { connections } = resolveConnectionState(graph, this.harnessNodeId);
+    await writeJsonAtomically(path.join(this.bridge.directory, "connections.json"), connections);
   }
 
   async isRegistered() {
@@ -134,22 +140,32 @@ class HarnessSession {
   }
 }
 
-async function createHarnessSession({ plugin, provider, bridge, key, harnessId, canvasPath, harnessNodeId }) {
+async function createHarnessSession({ plugin, provider, bridge, graph, key, harnessId, canvasPath, harnessNodeId }) {
   const file = plugin.app.vault.getAbstractFileByPath(canvasPath);
   if (!(file instanceof TFile)) throw new Error(`Canvas file "${canvasPath}" was not found in the vault.`);
-  const graph = parseCanvasGraph(await plugin.app.vault.cachedRead(file));
-  try {
-    bridge.targets = getOutgoingTargets(graph, harnessNodeId);
-  } catch {
-    bridge.targets = [];
-  }
-  bridge.connections = buildConnections(graph, harnessNodeId, bridge.targets);
+  // The caller resolves the node from the live Canvas document, which runs ahead of the saved file.
+  const canvasGraph = graph || parseCanvasGraph(await plugin.app.vault.cachedRead(file));
+  const { targets, connections } = resolveConnectionState(canvasGraph, harnessNodeId);
+  bridge.targets = targets;
+  bridge.connections = connections;
+  await writeJsonAtomically(path.join(bridge.directory, "connections.json"), connections);
   const launch = provider.createLaunchSpec({ bridge, vaultPath: plugin.getVaultPath() });
   const terminal = new TerminalSession(plugin, launch);
   const session = new HarnessSession({ plugin, provider, bridge, terminal, key, harnessId, canvasPath, harnessNodeId });
   terminal.onDispose = () => session.dispose();
   bridge.session = session;
   return session;
+}
+
+async function writeJsonAtomically(filePath, value) {
+  const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  await fsp.writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
+  await fsp.rename(temporaryPath, filePath);
+}
+
+function resolveConnectionState(graph, harnessNodeId) {
+  const targets = getOutgoingTargets(graph, harnessNodeId);
+  return { targets, connections: buildConnections(graph, harnessNodeId, targets) };
 }
 
 function buildConnections(graph, harnessNodeId, targets) {
