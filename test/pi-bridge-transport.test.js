@@ -9,6 +9,11 @@ const {
   BridgeProtocolError,
   createBridgeMessage,
   createBridgeSession,
+  createCanvasWriteOperation,
+  validateCanvasWriteAcknowledgement,
+  waitForWriteAcknowledgement,
+  writeCanvasWriteAcknowledgement,
+  writeCanvasWriteOperation,
   validateBridgeMessage,
   waitForAcknowledgement,
   writeAcknowledgement,
@@ -74,4 +79,31 @@ test("waits for an acknowledgement written by the bridge", async (t) => {
 test("times out without creating duplicate messages", async (t) => {
   const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
   await assert.rejects(waitForAcknowledgement(session, "msg-missing", { timeoutMs: 10, pollIntervalMs: 2 }), /Timed out/);
+});
+
+test("writes and acknowledges an authenticated Canvas operation", async (t) => {
+  const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
+  session.harnessId = "pi-main";
+  const operation = createCanvasWriteOperation({
+    harnessId: session.harnessId,
+    bridgeToken: session.bridgeToken,
+    canvasPath: "main.canvas",
+    harnessNodeId: "harness",
+    targetNodeId: "answer",
+    content: "draft",
+  });
+  const operationPath = await writeCanvasWriteOperation(session, operation);
+  assert.deepEqual(JSON.parse(await fs.readFile(operationPath, "utf8")), operation);
+
+  await writeCanvasWriteAcknowledgement(session, {
+    version: 1,
+    operationId: operation.operationId,
+    harnessId: session.harnessId,
+    status: "accepted",
+    targetNodeId: "answer",
+    receivedAt: new Date().toISOString(),
+  });
+  const acknowledgement = await waitForWriteAcknowledgement(session, operation.operationId, { timeoutMs: 100, pollIntervalMs: 2 });
+  assert.equal(acknowledgement.status, "accepted");
+  assert.doesNotThrow(() => validateCanvasWriteAcknowledgement(acknowledgement, { operationId: operation.operationId }));
 });
