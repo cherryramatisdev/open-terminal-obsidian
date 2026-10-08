@@ -694,12 +694,33 @@ bridge: ${SUPPORTED_BRIDGE}
 var require_canvas = __commonJS({
   "src/canvas.js"(exports2, module2) {
     "use strict";
-    var { ItemView, Notice: Notice2 } = require("obsidian");
+    var { ItemView, Notice: Notice2, TFile: TFile2 } = require("obsidian");
     var { newBlockMarkdown: newBlockMarkdown2 } = require_block_sessions();
     var { createPiHarnessMarkdown } = require_pi_harness();
+    function isCanvasView(view) {
+      return Boolean(view && view.getViewType() === "canvas" && view.canvas && view.file instanceof TFile2);
+    }
+    function openCanvasViews(app) {
+      const active = app.workspace.getActiveViewOfType(ItemView);
+      const views = [active, ...app.workspace.getLeavesOfType("canvas").map((leaf) => leaf.view)];
+      const ordered = [];
+      for (const view of views) {
+        if (!isCanvasView(view) || ordered.some((known) => known.file.path === view.file.path)) continue;
+        ordered.push(view);
+      }
+      return ordered;
+    }
+    function openCanvasPaths(app) {
+      return openCanvasViews(app).map((view) => view.file.path);
+    }
+    function liveCanvasContent(app, canvasPath) {
+      const view = openCanvasViews(app).find((candidate) => candidate.file.path === canvasPath);
+      const data = view && typeof view.canvas.getData === "function" ? view.canvas.getData() : null;
+      return data ? JSON.stringify(data) : null;
+    }
     function getActiveCanvas2(app) {
       const view = app.workspace.getActiveViewOfType(ItemView);
-      return view && view.getViewType() === "canvas" && view.canvas ? view.canvas : null;
+      return isCanvasView(view) ? view.canvas : null;
     }
     function addTerminalToCanvas2(canvas) {
       if (!canCreateTextNodes(canvas)) {
@@ -738,7 +759,7 @@ var require_canvas = __commonJS({
     function canvasCenter(canvas) {
       return typeof canvas.posCenter === "function" ? canvas.posCenter() : { x: 0, y: 0 };
     }
-    module2.exports = { getActiveCanvas: getActiveCanvas2, addPiHarnessToCanvas: addPiHarnessToCanvas2, addTerminalToCanvas: addTerminalToCanvas2 };
+    module2.exports = { getActiveCanvas: getActiveCanvas2, openCanvasPaths, liveCanvasContent, addPiHarnessToCanvas: addPiHarnessToCanvas2, addTerminalToCanvas: addTerminalToCanvas2 };
   }
 });
 
@@ -1265,7 +1286,7 @@ var require_harness_session = __commonJS({
     var { TFile: TFile2 } = require("obsidian");
     var { createBridgeMessage, waitForAcknowledgement, writeBridgeMessage, validateCanvasWriteOperation, writeCanvasWriteAcknowledgement } = require_harness_transport();
     var { getIncomingSourceNodes, getOutgoingTargets, messageFingerprint, buildCanvasMessageContent, parseCanvasGraph, resolveIncomingSourceNodes } = require_canvas_graph();
-    var TerminalSession = require_terminal_session();
+    var { TerminalSession } = require_terminal_session();
     var { writeCanvasOrVaultTarget } = require_canvas_writer();
     var HarnessSession = class {
       constructor({ plugin, provider, bridge, terminal, key, harnessId, canvasPath, harnessNodeId }) {
@@ -1294,6 +1315,7 @@ var require_harness_session = __commonJS({
       }
       async deliver(graph) {
         if (this.disposed || !await this.isRegistered()) return;
+        await this.syncConnections(graph);
         const sources = await resolveIncomingSourceNodes(graph, this.harnessNodeId, async (sourcePath) => {
           const file = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
           if (!(file instanceof TFile2)) throw new Error(`Referenced Canvas file "${sourcePath}" was not found in the vault.`);
@@ -1317,6 +1339,10 @@ var require_harness_session = __commonJS({
         });
         const acknowledgement = await writeBridgeMessage(this.bridge, message).then(() => waitForAcknowledgement(this.bridge, message.id));
         this.plugin.notify(`Harness ${this.harnessId}: ${acknowledgement.status}.`);
+      }
+      async syncConnections(graph) {
+        const { connections } = resolveConnectionState(graph, this.harnessNodeId);
+        await writeJsonAtomically(path2.join(this.bridge.directory, "connections.json"), connections);
       }
       async isRegistered() {
         try {
@@ -1387,22 +1413,30 @@ var require_harness_session = __commonJS({
         void fsp.rm(this.bridge.directory, { recursive: true, force: true });
       }
     };
-    async function createHarnessSession({ plugin, provider, bridge, key, harnessId, canvasPath, harnessNodeId }) {
+    async function createHarnessSession({ plugin, provider, bridge, graph, key, harnessId, canvasPath, harnessNodeId }) {
       const file = plugin.app.vault.getAbstractFileByPath(canvasPath);
       if (!(file instanceof TFile2)) throw new Error(`Canvas file "${canvasPath}" was not found in the vault.`);
-      const graph = parseCanvasGraph(await plugin.app.vault.cachedRead(file));
-      try {
-        bridge.targets = getOutgoingTargets(graph, harnessNodeId);
-      } catch {
-        bridge.targets = [];
-      }
-      bridge.connections = buildConnections(graph, harnessNodeId, bridge.targets);
+      const canvasGraph = graph || parseCanvasGraph(await plugin.app.vault.cachedRead(file));
+      const { targets, connections } = resolveConnectionState(canvasGraph, harnessNodeId);
+      bridge.targets = targets;
+      bridge.connections = connections;
+      await writeJsonAtomically(path2.join(bridge.directory, "connections.json"), connections);
       const launch = provider.createLaunchSpec({ bridge, vaultPath: plugin.getVaultPath() });
       const terminal = new TerminalSession(plugin, launch);
       const session = new HarnessSession({ plugin, provider, bridge, terminal, key, harnessId, canvasPath, harnessNodeId });
       terminal.onDispose = () => session.dispose();
       bridge.session = session;
       return session;
+    }
+    async function writeJsonAtomically(filePath, value) {
+      const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+      await fsp.writeFile(temporaryPath, `${JSON.stringify(value)}
+`, { encoding: "utf8", mode: 384 });
+      await fsp.rename(temporaryPath, filePath);
+    }
+    function resolveConnectionState(graph, harnessNodeId) {
+      const targets = getOutgoingTargets(graph, harnessNodeId);
+      return { targets, connections: buildConnections(graph, harnessNodeId, targets) };
     }
     function buildConnections(graph, harnessNodeId, targets) {
       const incoming = getIncomingSourceNodes(graph, harnessNodeId, { allowFiles: true });
@@ -1428,10 +1462,12 @@ var require_harness_session = __commonJS({
 var require_harness_manager = __commonJS({
   "src/harness-manager.js"(exports2, module2) {
     "use strict";
+    var fsp = require("fs/promises");
     var { TFile: TFile2 } = require("obsidian");
     var { createBridgeSession } = require_harness_transport();
     var { findDuplicateHarnessIds, parseHarnessNode, parseHarnessSource } = require_pi_harness();
     var { createHarnessSession } = require_harness_session();
+    var { liveCanvasContent, openCanvasPaths } = require_canvas();
     var { parseCanvasGraph } = require_canvas_graph();
     var DELIVERY_DEBOUNCE_MS = 750;
     var HarnessManager2 = class {
@@ -1444,7 +1480,7 @@ var require_harness_manager = __commonJS({
       key(canvasPath, nodeId) {
         return `${canvasPath}:${nodeId}`;
       }
-      async create(source, canvasPath) {
+      async create(source, sourcePath) {
         const declaration = parseHarnessSource(source);
         if (!declaration.valid) {
           this.plugin.notify(`Invalid harness: ${declaration.errors.join(" ")}`);
@@ -1455,11 +1491,13 @@ var require_harness_manager = __commonJS({
           this.plugin.notify(`Unsupported harness provider "${declaration.harness.agent}".`);
           return null;
         }
-        const harnessNodeId = await this.findNode(canvasPath, declaration.harness.id);
-        if (!harnessNodeId) {
-          this.plugin.notify(`Could not uniquely identify harness "${declaration.harness.id}" in ${canvasPath}.`);
+        const candidates = canvasCandidates(sourcePath, openCanvasPaths(this.plugin.app));
+        const located = await this.locate(candidates, declaration.harness.id);
+        if (!located) {
+          this.plugin.notify(`Could not uniquely identify harness "${declaration.harness.id}" in ${candidates[0] || "an open Canvas"}.`);
           return null;
         }
+        const { canvasPath, harnessNodeId, graph } = located;
         const key = this.key(canvasPath, harnessNodeId);
         const existing = this.sessions.get(key);
         if (existing && !existing.disposed) return existing.terminal;
@@ -1467,15 +1505,24 @@ var require_harness_manager = __commonJS({
         bridge.harnessId = declaration.harness.id;
         bridge.canvasPath = canvasPath;
         bridge.harnessNodeId = harnessNodeId;
-        const session = await createHarnessSession({
-          plugin: this.plugin,
-          provider,
-          bridge,
-          key,
-          harnessId: declaration.harness.id,
-          canvasPath,
-          harnessNodeId
-        });
+        let session;
+        try {
+          session = await createHarnessSession({
+            plugin: this.plugin,
+            provider,
+            bridge,
+            graph,
+            key,
+            harnessId: declaration.harness.id,
+            canvasPath,
+            harnessNodeId
+          });
+        } catch (error) {
+          await fsp.rm(bridge.directory, { recursive: true, force: true }).catch(() => {
+          });
+          this.plugin.notify(`Could not start harness "${declaration.harness.id}": ${error.message}`);
+          return null;
+        }
         session.onDispose = () => this.remove(session);
         this.sessions.set(key, session);
         session.start();
@@ -1492,8 +1539,8 @@ var require_harness_manager = __commonJS({
       async deliver(file) {
         let graph;
         try {
-          graph = parseCanvasGraph(await this.plugin.app.vault.cachedRead(file));
-          if (findDuplicateHarnessIds(graph.nodes).length) return;
+          graph = (await this.canvasGraphs(file.path))[0];
+          if (!graph || findDuplicateHarnessIds(graph.nodes).length) return;
         } catch {
           return;
         }
@@ -1510,12 +1557,26 @@ var require_harness_manager = __commonJS({
           }
         }
       }
-      async findNode(canvasPath, harnessId) {
+      /** First candidate Canvas that holds exactly one node declaring the harness. */
+      async locate(canvasPaths, harnessId) {
+        for (const canvasPath of canvasPaths) {
+          for (const graph of await this.canvasGraphs(canvasPath)) {
+            const matches = graph.nodes.filter((node) => node.type === "text" && parseHarnessNode(node.text).harness?.id === harnessId);
+            if (matches.length === 1) return { canvasPath, harnessNodeId: matches[0].id, graph };
+            if (matches.length > 1) return null;
+          }
+        }
+        return null;
+      }
+      /**
+       * A Canvas code block has no source path and a card Obsidian created moments ago may not be
+       * in the saved file yet, so the live Canvas document is searched before the file on disk.
+       */
+      async canvasGraphs(canvasPath) {
+        const contents = [liveCanvasContent(this.plugin.app, canvasPath)];
         const file = this.plugin.app.vault.getAbstractFileByPath(canvasPath);
-        if (!(file instanceof TFile2)) return null;
-        const graph = parseCanvasGraph(await this.plugin.app.vault.cachedRead(file));
-        const matches = graph.nodes.filter((node) => node.type === "text" && parseHarnessNode(node.text).harness?.id === harnessId);
-        return matches.length === 1 ? matches[0].id : null;
+        if (file instanceof TFile2) contents.push(await this.plugin.app.vault.cachedRead(file));
+        return contents.filter(Boolean).map((content) => parseCanvasGraph(content));
       }
       remove(session) {
         if (this.sessions.get(session.key) === session) this.sessions.delete(session.key);
@@ -1527,6 +1588,13 @@ var require_harness_manager = __commonJS({
         this.sessions.clear();
       }
     };
+    function canvasCandidates(sourcePath, openPaths) {
+      const paths = [];
+      for (const candidate of [sourcePath, ...openPaths]) {
+        if (typeof candidate === "string" && candidate.endsWith(".canvas") && !paths.includes(candidate)) paths.push(candidate);
+      }
+      return paths;
+    }
     module2.exports = { HarnessManager: HarnessManager2 };
   }
 });
@@ -1553,8 +1621,7 @@ var require_harness_provider = __commonJS({
           OPEN_TERMINAL_PROTOCOL_VERSION: String(bridge.protocolVersion),
           OPEN_TERMINAL_CANVAS_PATH: bridge.canvasPath || "",
           OPEN_TERMINAL_HARNESS_NODE_ID: bridge.harnessNodeId || "",
-          OPEN_TERMINAL_CANVAS_TARGETS: JSON.stringify(bridge.targets || []),
-          OPEN_TERMINAL_CANVAS_CONNECTIONS: JSON.stringify(bridge.connections || [])
+          OPEN_TERMINAL_CANVAS_TARGETS: JSON.stringify(bridge.targets || [])
         };
         return {
           cwd: vaultPath,
