@@ -7,17 +7,12 @@ const path = require("node:path");
 const test = require("node:test");
 const {
   BridgeProtocolError,
-  createBridgeMessage,
   createBridgeSession,
   createCanvasWriteOperation,
   validateCanvasWriteAcknowledgement,
   waitForWriteAcknowledgement,
   writeCanvasWriteAcknowledgement,
   writeCanvasWriteOperation,
-  validateBridgeMessage,
-  waitForAcknowledgement,
-  writeAcknowledgement,
-  writeBridgeMessage,
 } = require("../src/pi-bridge-transport");
 
 async function temporaryRoot(t) {
@@ -26,59 +21,14 @@ async function temporaryRoot(t) {
   return root;
 }
 
-test("creates a private session directory outside the vault and atomically writes a message", async (t) => {
+test("creates a private session directory outside the vault with a Canvas state path", async (t) => {
   const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
-  const message = createBridgeMessage({
-    harnessId: "pi-main",
-    bridgeToken: session.bridgeToken,
-    canvasPath: "projects/example.canvas",
-    workingDirectory: "/vault/projects/example",
-    sourceNodes: [{ id: "requirements", type: "text", title: "Requirements", contentHash: "sha256:abc" }],
-    content: "## Source: Requirements\n\nBuild it.",
-  });
-
-  const messagePath = await writeBridgeMessage(session, message);
-  const stored = JSON.parse(await fs.readFile(messagePath, "utf8"));
 
   assert.match(session.directory, /open-terminal-pi/);
-  assert.deepEqual(stored, message);
-  assert.equal(path.extname(messagePath), ".json");
-  assert.equal((await fs.readdir(session.inboxDirectory)).some((name) => name.endsWith(".tmp")), false);
-});
-
-test("rejects an envelope with a mismatched bridge token", async (t) => {
-  const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
-  const message = createBridgeMessage({
-    harnessId: "pi-main",
-    bridgeToken: "wrong-token",
-    sourceNodes: [],
-    content: "Context",
-  });
-
-  assert.throws(() => validateBridgeMessage(message, { bridgeToken: session.bridgeToken, harnessId: "pi-main" }), BridgeProtocolError);
-  await assert.rejects(writeBridgeMessage(session, message), BridgeProtocolError);
-});
-
-test("waits for an acknowledgement written by the bridge", async (t) => {
-  const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
-  const message = createBridgeMessage({ harnessId: "pi-main", bridgeToken: session.bridgeToken, sourceNodes: [], content: "Context" });
-
-  setTimeout(() => writeAcknowledgement(session, {
-    version: 1,
-    messageId: message.id,
-    harnessId: "pi-main",
-    status: "accepted",
-    receivedAt: new Date().toISOString(),
-  }), 15);
-
-  const acknowledgement = await waitForAcknowledgement(session, message.id, { timeoutMs: 200, pollIntervalMs: 5 });
-  assert.equal(acknowledgement.status, "accepted");
-  assert.equal(acknowledgement.messageId, message.id);
-});
-
-test("times out without creating duplicate messages", async (t) => {
-  const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
-  await assert.rejects(waitForAcknowledgement(session, "msg-missing", { timeoutMs: 10, pollIntervalMs: 2 }), /Timed out/);
+  assert.equal(path.dirname(session.canvasStatePath), session.directory);
+  assert.equal(path.basename(session.canvasStatePath), "canvas-state.json");
+  assert.equal(await fs.readFile(session.canvasStatePath, "utf8").catch(() => null), null);
+  assert.deepEqual(await fs.readdir(session.outboxDirectory), []);
 });
 
 test("writes and acknowledges an authenticated Canvas operation", async (t) => {
@@ -106,4 +56,24 @@ test("writes and acknowledges an authenticated Canvas operation", async (t) => {
   const acknowledgement = await waitForWriteAcknowledgement(session, operation.operationId, { timeoutMs: 100, pollIntervalMs: 2 });
   assert.equal(acknowledgement.status, "accepted");
   assert.doesNotThrow(() => validateCanvasWriteAcknowledgement(acknowledgement, { operationId: operation.operationId }));
+});
+
+test("rejects an operation with a mismatched bridge token", async (t) => {
+  const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
+  session.harnessId = "pi-main";
+  const operation = createCanvasWriteOperation({
+    harnessId: session.harnessId,
+    bridgeToken: "wrong-token",
+    canvasPath: "main.canvas",
+    harnessNodeId: "harness",
+    targetNodeId: "answer",
+    content: "draft",
+  });
+
+  await assert.rejects(writeCanvasWriteOperation(session, operation), BridgeProtocolError);
+});
+
+test("times out without writing a duplicate operation", async (t) => {
+  const session = await createBridgeSession({ temporaryRoot: await temporaryRoot(t) });
+  await assert.rejects(waitForWriteAcknowledgement(session, "write-missing", { timeoutMs: 10, pollIntervalMs: 2 }), /Timed out/);
 });
