@@ -67,9 +67,9 @@ class OpenTerminalSettingTab extends PluginSettingTab {
       .addText((t) =>
         t
           .setPlaceholder("pi")
-          .setValue(s.piPath)
+          .setValue(s.harnessProviders.pi.executable)
           .onChange(async (v) => {
-            s.piPath = v;
+            s.harnessProviders.pi.executable = v;
             await save();
           })
       );

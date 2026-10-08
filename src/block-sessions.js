@@ -34,9 +34,10 @@ function newBlockMarkdown() {
 }
 
 class BlockSessions {
-  constructor(plugin, { language = BLOCK_LANG, createSession } = {}) {
+  constructor(plugin, { language = BLOCK_LANG, createSession, keyFor = blockKey } = {}) {
     this.plugin = plugin;
     this.language = language;
+    this.keyFor = keyFor;
     this.createSession = createSession || ((opts, ctx) => new TerminalSession(this.plugin, {
       cwd: this.resolveCwd(opts.cwd, ctx.sourcePath),
       command: opts.command,
@@ -48,7 +49,7 @@ class BlockSessions {
   /** Markdown code block processor for a terminal-like block. */
   async process(source, el, ctx) {
     const opts = parseBlockOptions(source);
-    const key = blockKey(source, ctx.sourcePath);
+    const key = this.keyFor(source, ctx.sourcePath);
     let session = this.sessions.get(key);
     if (!session || session.disposed) {
       session = await this.createSession(opts, ctx, source);
@@ -114,9 +115,11 @@ class BlockSessions {
       }
     }
     const keys = new Set();
-    const fence = new RegExp("^(`{3,}|~{3,})[ \\t]*" + this.language + "[ \\t]*\\r?\\n([\\s\\S]*?)^\\1[ \\t]*$", "gm");
+    const languages = Array.isArray(this.language) ? this.language : [this.language];
+    const languagePattern = languages.map((language) => language.replace(/[.*+?^${}()|[\\]\\]/g, "\\\\$&")).join("|");
+    const fence = new RegExp("^(`{3,}|~{3,})[ \\t]*(?:" + languagePattern + ")[ \\t]*\\r?\\n([\\s\\S]*?)^\\1[ \\t]*$", "gm");
     for (const text of texts) {
-      for (const m of text.matchAll(fence)) keys.add(blockKey(m[2], file.path));
+      for (const m of text.matchAll(fence)) keys.add(this.keyFor(m[2], file.path));
     }
     return keys;
   }

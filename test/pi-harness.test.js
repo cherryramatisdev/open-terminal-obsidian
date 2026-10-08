@@ -2,7 +2,7 @@
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { createPiHarnessMarkdown, findDuplicateHarnessIds, parsePiHarnessNode } = require("../src/pi-harness");
+const { createPiHarnessMarkdown, findDuplicateHarnessIds, parseHarnessNode, parsePiHarnessNode } = require("../src/pi-harness");
 
 test("creates a stable, valid Pi harness declaration", () => {
   const text = createPiHarnessMarkdown("pi-main");
@@ -28,6 +28,13 @@ test("rejects malformed or unsupported harness declarations", () => {
     assert.equal(result.valid, false, text);
     assert.ok(result.errors.includes(error), text);
   }
+});
+
+test("parses the runtime-neutral declaration format", () => {
+  const result = parseHarnessNode("```agent-harness\nid: reviewer\nprovider: claude-code\n```");
+
+  assert.equal(result.valid, true);
+  assert.equal(result.harness.provider, "claude-code");
 });
 
 test("finds duplicate valid harness IDs without treating invalid nodes as harnesses", () => {

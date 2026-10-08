@@ -20,6 +20,7 @@ class TerminalSession {
     this.disposed = false;
     this.lastActive = Date.now();
     this.parentEl = null;
+    this.onDispose = null;
     // Called by runInTerminal/reveal(); set by whoever displays the session
     this.onReveal = null;
     this.el = createDiv({ cls: "open-terminal-xterm" });
@@ -160,7 +161,7 @@ class TerminalSession {
     });
     host.stderr.on("data", (d) => this.term && this.term.write(`\x1b[31m${d.replace(/\n/g, "\r\n")}\x1b[0m`));
     host.on("error", (err) => {
-      this.term && this.term.writeln(`\x1b[31mFailed to start the terminal: ${err.message}\x1b[0m`);
+      if (this.term) this.term.writeln(`\x1b[31mFailed to start the terminal: ${err.message}\x1b[0m`);
     });
     host.on("exit", () => {
       if (this.host !== host) return;
@@ -257,6 +258,7 @@ class TerminalSession {
     if (this.disposed) return;
     this.disposed = true;
     this.detach();
+    if (this.onDispose) this.onDispose();
     this.kill();
     this.host = null;
     if (this.term) {
