@@ -2,9 +2,9 @@
 
 // Plugin entry point. Bundled into ../main.js by esbuild (npm run build).
 
-const { Plugin, Notice, FileSystemAdapter, TFile, TFolder } = require("obsidian");
+const { Plugin, Notice, FileSystemAdapter, ItemView, TFile, TFolder } = require("obsidian");
 const crypto = require("crypto");
-const fs = require("fs/promises");
+const fsp = require("fs/promises");
 const path = require("path");
 const { VIEW_TYPE, BLOCK_LANG, DEFAULT_SETTINGS } = require("./constants");
 const shell = require("./shell");
@@ -13,9 +13,9 @@ const { TerminalSession } = require("./terminal-session");
 const { BlockSessions, newBlockMarkdown } = require("./block-sessions");
 const { getActiveCanvas, addPiHarnessToCanvas, addTerminalToCanvas } = require("./canvas");
 const { OpenTerminalSettingTab } = require("./settings-tab");
-const { BridgeModifiedError, ensurePiBridgeInstalled } = require("./pi-bridge-installer");
-const { createBridgeMessage, createBridgeSession, waitForAcknowledgement, writeBridgeMessage } = require("./pi-bridge-transport");
-const { buildCanvasMessageContent, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes } = require("./canvas-graph");
+const { createBridgeMessage, createBridgeSession, waitForAcknowledgement, writeBridgeMessage, validateCanvasWriteOperation, writeCanvasWriteAcknowledgement } = require("./pi-bridge-transport");
+const { buildCanvasMessageContent, getOutgoingTargets, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes } = require("./canvas-graph");
+const { writeCanvasOrVaultTarget } = require("./canvas-writer");
 const { findDuplicateHarnessIds, HARNESS_LANGUAGE, parsePiHarnessNode } = require("./pi-harness");
 
 class OpenTerminalPlugin extends Plugin {
@@ -24,6 +24,7 @@ class OpenTerminalPlugin extends Plugin {
     this.piHarnessSessions = new Map();
     this.autoDeliveryFingerprints = new Map();
     this.autoDeliveryTimers = new Map();
+    this.canvasWriteWatchers = new Map();
     this.registerEvent(this.app.vault.on("modify", (file) => this.scheduleAutoDelivery(file)));
 
     this.registerView(VIEW_TYPE, (leaf) => new TerminalView(leaf, this));
@@ -124,18 +125,6 @@ class OpenTerminalPlugin extends Plugin {
       },
     });
 
-    this.addCommand({
-      id: "install-pi-bridge",
-      name: "Install Open Terminal Pi bridge",
-      callback: () => this.installPiBridge(),
-    });
-
-    this.addCommand({
-      id: "reinstall-pi-bridge",
-      name: "Reinstall Open Terminal Pi bridge (overwrite local changes)",
-      callback: () => this.installPiBridge({ force: true }),
-    });
-
     this.addSettingTab(new OpenTerminalSettingTab(this.app, this));
   }
 
@@ -144,6 +133,8 @@ class OpenTerminalPlugin extends Plugin {
     this.piHarnessBlocks.disposeAll();
     for (const timer of this.autoDeliveryTimers.values()) clearTimeout(timer);
     this.autoDeliveryTimers.clear();
+    for (const watcher of this.canvasWriteWatchers.values()) clearInterval(watcher);
+    this.canvasWriteWatchers.clear();
   }
 
   /**
@@ -196,33 +187,6 @@ class OpenTerminalPlugin extends Plugin {
     await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { cwd, command, env } });
     workspace.revealLeaf(leaf);
     return leaf.view;
-  }
-
-  async installPiBridge({ force = false } = {}) {
-    const vaultPath = this.getVaultPath();
-    if (!vaultPath) {
-      new Notice("Could not determine the vault path for Pi bridge installation.");
-      return null;
-    }
-
-    try {
-      const result = await ensurePiBridgeInstalled({
-        sourcePath: path.join(this.pluginDir(), "bridge", "open-terminal-canvas.js"),
-        vaultPath,
-        pluginVersion: this.manifest.version,
-        force,
-      });
-      const action = result.status === "current" ? "is already current" : `${result.status} successfully`;
-      new Notice(`Open Terminal Pi bridge ${action}.`);
-      return result;
-    } catch (error) {
-      if (error instanceof BridgeModifiedError) {
-        new Notice("The Open Terminal Pi bridge has local changes. Use the reinstall command to overwrite it.");
-        return null;
-      }
-      new Notice(`Could not install the Open Terminal Pi bridge: ${error.message}`);
-      return null;
-    }
   }
 
   scheduleAutoDelivery(file) {
@@ -287,6 +251,11 @@ class OpenTerminalPlugin extends Plugin {
 
   /** Creates the live Pi terminal rendered inside a pi-harness Canvas card. */
   async createEmbeddedPiHarnessSession(source, sourcePath) {
+    sourcePath = sourcePath || this.getActiveCanvasPath();
+    if (!sourcePath) {
+      new Notice("Could not determine the Canvas file for this Pi harness.");
+      return null;
+    }
     const declaration = parsePiHarnessNode(`\`\`\`${HARNESS_LANGUAGE}\n${source}\n\`\`\``);
     if (!declaration.valid) {
       new Notice(`Invalid Pi harness: ${declaration.errors.join(" ")}`);
@@ -295,10 +264,11 @@ class OpenTerminalPlugin extends Plugin {
     const harnessId = declaration.harness.id;
     const existing = this.piHarnessSessions.get(harnessId);
     if (existing && existing.terminal && !existing.terminal.disposed) return existing.terminal;
-    if (!(await this.installPiBridge())) return null;
-
     const bridge = await createBridgeSession();
     bridge.harnessId = harnessId;
+    bridge.canvasPath = sourcePath;
+    bridge.harnessNodeId = await this.findHarnessNodeId(sourcePath, harnessId);
+    const targets = await this.getCanvasWriteTargets(bridge);
     const vaultPath = this.getVaultPath();
     const env = {
       OPEN_TERMINAL_VAULT_ID: crypto.createHash("sha256").update(vaultPath).digest("hex"),
@@ -306,13 +276,25 @@ class OpenTerminalPlugin extends Plugin {
       OPEN_TERMINAL_BRIDGE_DIR: bridge.directory,
       OPEN_TERMINAL_BRIDGE_TOKEN: bridge.bridgeToken,
       OPEN_TERMINAL_PROTOCOL_VERSION: String(bridge.protocolVersion),
+      OPEN_TERMINAL_CANVAS_PATH: bridge.canvasPath || "",
+      OPEN_TERMINAL_HARNESS_NODE_ID: bridge.harnessNodeId || "",
+      OPEN_TERMINAL_CANVAS_TARGETS: JSON.stringify(targets),
     };
     const executable = this.settings.piPath.trim() || "pi";
-    const terminal = new TerminalSession(this, { cwd: vaultPath, command: this.quoteArg(executable), env });
+    const bridgeExtensionPath = path.join(this.pluginDir(), "bridge", "open-terminal-canvas.js");
+    const piCommand = `${this.quoteArg(executable)} --extension ${this.quoteArg(bridgeExtensionPath)} --exclude-tools edit,write`;
+    const terminal = new TerminalSession(this, { cwd: vaultPath, command: piCommand, env });
     bridge.terminal = terminal;
     this.piHarnessSessions.set(harnessId, bridge);
+    this.startCanvasWriteWatcher(bridge);
     if (sourcePath) void this.baselineAutoDelivery(sourcePath, harnessId);
     return terminal;
+  }
+
+  getActiveCanvasPath() {
+    const view = this.app.workspace.getActiveViewOfType(ItemView);
+    if (!view || view.getViewType() !== "canvas") return null;
+    return view.file?.path || view.getState?.().file || null;
   }
 
   async baselineAutoDelivery(sourcePath, harnessId) {
@@ -329,11 +311,84 @@ class OpenTerminalPlugin extends Plugin {
     } catch {}
   }
 
+  async findHarnessNodeId(sourcePath, harnessId) {
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile) || file.extension !== "canvas") return null;
+    const graph = parseCanvasGraph(await this.app.vault.cachedRead(file));
+    const matches = graph.nodes.filter((node) => node.type === "text" && parsePiHarnessNode(node.text).harness?.id === harnessId);
+    return matches.length === 1 ? matches[0].id : null;
+  }
+
+  async getCanvasWriteTargets(bridge) {
+    if (!bridge.canvasPath || !bridge.harnessNodeId) return [];
+    const file = this.app.vault.getAbstractFileByPath(bridge.canvasPath);
+    if (!(file instanceof TFile)) return [];
+    try {
+      const graph = parseCanvasGraph(await this.app.vault.cachedRead(file));
+      return getOutgoingTargets(graph, bridge.harnessNodeId);
+    } catch {
+      return [];
+    }
+  }
+
+  startCanvasWriteWatcher(bridge) {
+    bridge.writeProcessing = Promise.resolve();
+    const process = () => {
+      bridge.writeProcessing = bridge.writeProcessing.then(() => this.processCanvasWriteOperations(bridge)).catch(() => {});
+    };
+    const timer = setInterval(process, 100);
+    this.canvasWriteWatchers.set(bridge.harnessId, timer);
+    process();
+  }
+
+  async processCanvasWriteOperations(bridge) {
+    if (!bridge || !bridge.canvasPath) return;
+    let names;
+    try { names = (await fsp.readdir(bridge.outboxDirectory)).filter((name) => name.endsWith(".json")).sort(); } catch { return; }
+    for (const name of names) {
+      const operationPath = path.join(bridge.outboxDirectory, name);
+      let operation;
+      try {
+        operation = JSON.parse(await fsp.readFile(operationPath, "utf8"));
+        validateCanvasWriteOperation(operation, { harnessId: bridge.harnessId, bridgeToken: bridge.bridgeToken });
+        if (operation.canvasPath !== bridge.canvasPath) throw new Error("Canvas operation does not match the active harness session.");
+        if (bridge.harnessNodeId && operation.harnessNodeId !== bridge.harnessNodeId) throw new Error("Canvas operation targets a different harness node.");
+        const harnessNodeId = bridge.harnessNodeId || operation.harnessNodeId;
+        bridge.harnessNodeId = harnessNodeId;
+        const canvasFile = this.app.vault.getAbstractFileByPath(bridge.canvasPath);
+        if (!(canvasFile instanceof TFile)) throw new Error(`Canvas file "${bridge.canvasPath}" was not found.`);
+        const result = await writeCanvasOrVaultTarget({ vault: this.app.vault, canvasFile, harnessNodeId, targetNodeId: operation.targetNodeId, content: operation.content, mode: operation.mode });
+        await this.writeCanvasOperationAck(bridge, operation, { status: "accepted", ...result });
+        await this.moveCanvasOperation(operationPath, path.join(bridge.writeProcessedDirectory, name));
+      } catch (error) {
+        const operationId = operation && operation.operationId ? operation.operationId : path.basename(name, ".json");
+        if (typeof operationId === "string" && operationId.startsWith("write-")) {
+          await this.writeCanvasOperationAck(bridge, { operationId, harnessId: bridge.harnessId }, { status: "rejected", error: error.message });
+          await this.moveCanvasOperation(operationPath, path.join(bridge.writeErrorsDirectory, name));
+        }
+      }
+    }
+  }
+
+  async writeCanvasOperationAck(bridge, operation, result) {
+    await writeCanvasWriteAcknowledgement(bridge, {
+      version: bridge.protocolVersion,
+      operationId: operation.operationId,
+      harnessId: bridge.harnessId,
+      receivedAt: new Date().toISOString(),
+      ...result,
+    });
+  }
+
+  async moveCanvasOperation(from, to) {
+    try { await fsp.rename(from, to); } catch (error) { if (error.code !== "ENOENT") throw error; }
+  }
+
   async isPiHarnessRegistered(harnessId) {
     const session = this.piHarnessSessions.get(harnessId);
     if (!session) return false;
     try {
-      const registration = JSON.parse(await fs.readFile(session.sessionPath, "utf8"));
+      const registration = JSON.parse(await fsp.readFile(session.sessionPath, "utf8"));
       return registration.protocolVersion === session.protocolVersion && registration.harnessId === harnessId;
     } catch {
       return false;

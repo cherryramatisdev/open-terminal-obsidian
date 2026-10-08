@@ -38,7 +38,7 @@ var require_constants = __commonJS({
 var require_shell = __commonJS({
   "src/shell.js"(exports2, module2) {
     "use strict";
-    var fs2 = require("fs");
+    var fs = require("fs");
     var path2 = require("path");
     var { SHELLS } = require_constants();
     function getShell(settings) {
@@ -64,7 +64,7 @@ var require_shell = __commonJS({
       } else {
         candidates.push("/usr/local/bin/node", "/opt/homebrew/bin/node", "/usr/bin/node");
       }
-      return candidates.find((c) => fs2.existsSync(c)) || null;
+      return candidates.find((c) => fs.existsSync(c)) || null;
     }
     function quoteArg(shellCmd, arg) {
       const shell2 = shellCmd.toLowerCase();
@@ -323,11 +323,11 @@ var require_terminal_session = __commonJS({
 var require_terminal_view = __commonJS({
   "src/terminal-view.js"(exports2, module2) {
     "use strict";
-    var { ItemView } = require("obsidian");
+    var { ItemView: ItemView2 } = require("obsidian");
     var path2 = require("path");
     var { VIEW_TYPE: VIEW_TYPE2 } = require_constants();
     var { TerminalSession: TerminalSession2 } = require_terminal_session();
-    var TerminalView2 = class extends ItemView {
+    var TerminalView2 = class extends ItemView2 {
       constructor(leaf, plugin) {
         super(leaf);
         this.plugin = plugin;
@@ -664,11 +664,11 @@ bridge: ${SUPPORTED_BRIDGE}
 var require_canvas = __commonJS({
   "src/canvas.js"(exports2, module2) {
     "use strict";
-    var { ItemView, Notice: Notice2 } = require("obsidian");
+    var { ItemView: ItemView2, Notice: Notice2 } = require("obsidian");
     var { newBlockMarkdown: newBlockMarkdown2 } = require_block_sessions();
     var { createPiHarnessMarkdown } = require_pi_harness();
     function getActiveCanvas2(app) {
-      const view = app.workspace.getActiveViewOfType(ItemView);
+      const view = app.workspace.getActiveViewOfType(ItemView2);
       return view && view.getViewType() === "canvas" && view.canvas ? view.canvas : null;
     }
     function addTerminalToCanvas2(canvas) {
@@ -782,98 +782,17 @@ var require_settings_tab = __commonJS({
   }
 });
 
-// src/pi-bridge-installer.js
-var require_pi_bridge_installer = __commonJS({
-  "src/pi-bridge-installer.js"(exports2, module2) {
-    "use strict";
-    var crypto2 = require("crypto");
-    var fs2 = require("fs/promises");
-    var path2 = require("path");
-    var BRIDGE_DIRECTORY = [".pi", "extensions", "open-terminal-canvas"];
-    var BRIDGE_FILENAME = "index.js";
-    var MANIFEST_FILENAME = "manifest.json";
-    var MANAGED_BY = "open-terminal-obsidian";
-    var PROTOCOL_VERSION = 1;
-    var BridgeModifiedError2 = class extends Error {
-      constructor(bridgePath) {
-        super(`The managed Pi bridge was modified and will not be overwritten: ${bridgePath}`);
-        this.name = "BridgeModifiedError";
-        this.bridgePath = bridgePath;
-      }
-    };
-    function sha256(content) {
-      return `sha256:${crypto2.createHash("sha256").update(content).digest("hex")}`;
-    }
-    async function readFileOrNull(filePath) {
-      try {
-        return await fs2.readFile(filePath, "utf8");
-      } catch (error) {
-        if (error && error.code === "ENOENT") return null;
-        throw error;
-      }
-    }
-    async function writeAtomically(filePath, content) {
-      const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-      await fs2.writeFile(temporaryPath, content, { encoding: "utf8", mode: 384 });
-      await fs2.rename(temporaryPath, filePath);
-    }
-    function parseManifest(content, manifestPath) {
-      if (!content) return null;
-      try {
-        return JSON.parse(content);
-      } catch {
-        throw new BridgeModifiedError2(manifestPath);
-      }
-    }
-    async function ensurePiBridgeInstalled2({ sourcePath, vaultPath, pluginVersion, force = false }) {
-      if (!sourcePath || !vaultPath || !pluginVersion) throw new Error("Bridge installation requires sourcePath, vaultPath, and pluginVersion.");
-      const source = await fs2.readFile(sourcePath, "utf8");
-      const sourceHash = sha256(source);
-      const extensionDir = path2.join(vaultPath, ...BRIDGE_DIRECTORY);
-      const bridgePath = path2.join(extensionDir, BRIDGE_FILENAME);
-      const manifestPath = path2.join(extensionDir, MANIFEST_FILENAME);
-      const currentBridge = await readFileOrNull(bridgePath);
-      const currentManifest = parseManifest(await readFileOrNull(manifestPath), manifestPath);
-      if (!force && currentBridge !== null) {
-        const currentHash = sha256(currentBridge);
-        const isManaged = currentManifest && currentManifest.managedBy === MANAGED_BY && typeof currentManifest.managedHash === "string" && currentManifest.managedHash === currentHash;
-        if (!isManaged) throw new BridgeModifiedError2(bridgePath);
-      }
-      const manifest = {
-        managedBy: MANAGED_BY,
-        pluginVersion,
-        protocolVersion: PROTOCOL_VERSION,
-        managedHash: sourceHash
-      };
-      const unchanged = currentBridge === source && currentManifest && JSON.stringify(currentManifest) === JSON.stringify(manifest);
-      if (unchanged) return { status: "current", bridgePath, manifestPath, manifest };
-      await fs2.mkdir(extensionDir, { recursive: true, mode: 448 });
-      await writeAtomically(bridgePath, source);
-      await writeAtomically(manifestPath, `${JSON.stringify(manifest, null, 2)}
-`);
-      return { status: currentBridge === null ? "installed" : "updated", bridgePath, manifestPath, manifest };
-    }
-    module2.exports = {
-      BRIDGE_DIRECTORY,
-      BridgeModifiedError: BridgeModifiedError2,
-      PROTOCOL_VERSION,
-      ensurePiBridgeInstalled: ensurePiBridgeInstalled2,
-      sha256
-    };
-  }
-});
-
 // src/pi-bridge-transport.js
 var require_pi_bridge_transport = __commonJS({
   "src/pi-bridge-transport.js"(exports2, module2) {
     "use strict";
     var crypto2 = require("crypto");
-    var fs2 = require("fs/promises");
+    var fs = require("fs/promises");
     var os = require("os");
     var path2 = require("path");
     var PROTOCOL_VERSION = 1;
     var SESSION_DIRECTORY_NAME = "open-terminal-pi";
-    var MESSAGE_ID = /^msg-[A-Za-z0-9-]+$/;
+    var MESSAGE_ID = /^(msg|write)-[A-Za-z0-9-]+$/;
     var BridgeProtocolError = class extends Error {
       constructor(message) {
         super(message);
@@ -896,13 +815,21 @@ var require_pi_bridge_transport = __commonJS({
         processedDirectory: path2.join(directory, "processed"),
         acknowledgementsDirectory: path2.join(directory, "acks"),
         errorsDirectory: path2.join(directory, "errors"),
+        outboxDirectory: path2.join(directory, "outbox"),
+        writeProcessedDirectory: path2.join(directory, "write-processed"),
+        writeAcknowledgementsDirectory: path2.join(directory, "write-acks"),
+        writeErrorsDirectory: path2.join(directory, "write-errors"),
         sessionPath: path2.join(directory, "session.json")
       };
       await Promise.all([
-        fs2.mkdir(session.inboxDirectory, { recursive: true, mode: 448 }),
-        fs2.mkdir(session.processedDirectory, { recursive: true, mode: 448 }),
-        fs2.mkdir(session.acknowledgementsDirectory, { recursive: true, mode: 448 }),
-        fs2.mkdir(session.errorsDirectory, { recursive: true, mode: 448 })
+        fs.mkdir(session.inboxDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.processedDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.acknowledgementsDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.errorsDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.outboxDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.writeProcessedDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.writeAcknowledgementsDirectory, { recursive: true, mode: 448 }),
+        fs.mkdir(session.writeErrorsDirectory, { recursive: true, mode: 448 })
       ]);
       return session;
     }
@@ -947,6 +874,76 @@ var require_pi_bridge_transport = __commonJS({
       await writeJsonAtomically(acknowledgementPath, acknowledgement);
       return acknowledgementPath;
     }
+    function createCanvasWriteOperation({ harnessId, bridgeToken, canvasPath, harnessNodeId, targetNodeId, content, mode = "replace" }) {
+      const operation = {
+        version: PROTOCOL_VERSION,
+        operationId: randomId("write"),
+        operation: "write_canvas_node",
+        harnessId,
+        bridgeToken,
+        canvasPath,
+        harnessNodeId,
+        targetNodeId,
+        content,
+        mode,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      validateCanvasWriteOperation2(operation);
+      return operation;
+    }
+    function validateCanvasWriteOperation2(operation, expected = {}) {
+      if (!operation || typeof operation !== "object" || operation.version !== PROTOCOL_VERSION) throw new BridgeProtocolError("Canvas write operation has an unsupported protocol version.");
+      for (const field of ["operationId", "harnessId", "bridgeToken", "canvasPath", "harnessNodeId", "targetNodeId", "content", "createdAt"]) {
+        if (typeof operation[field] !== "string" || !operation[field]) throw new BridgeProtocolError(`Canvas write field "${field}" is required.`);
+      }
+      if (operation.operation !== "write_canvas_node") throw new BridgeProtocolError("Unsupported Canvas operation.");
+      if (!MESSAGE_ID.test(operation.operationId) || !operation.operationId.startsWith("write-")) throw new BridgeProtocolError("Canvas operation ID is invalid.");
+      if (!["replace", "append"].includes(operation.mode)) throw new BridgeProtocolError("Canvas write mode is invalid.");
+      if (expected.harnessId && operation.harnessId !== expected.harnessId) throw new BridgeProtocolError("Canvas operation targets a different harness.");
+      if (expected.bridgeToken && operation.bridgeToken !== expected.bridgeToken) throw new BridgeProtocolError("Canvas operation token is not authorized for this session.");
+      return operation;
+    }
+    async function writeCanvasWriteOperation(session, operation) {
+      validateCanvasWriteOperation2(operation, { bridgeToken: session.bridgeToken, harnessId: session.harnessId });
+      const operationPath = path2.join(session.outboxDirectory, `${operation.operationId}.json`);
+      await writeJsonAtomically(operationPath, operation);
+      return operationPath;
+    }
+    async function waitForWriteAcknowledgement(session, operationId, { timeoutMs = 1e4, pollIntervalMs = 100 } = {}) {
+      const acknowledgementPath = path2.join(session.writeAcknowledgementsDirectory, `${operationId}.json`);
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() <= deadline) {
+        const content = await readFileOrNull(acknowledgementPath);
+        if (content !== null) {
+          let acknowledgement;
+          try {
+            acknowledgement = JSON.parse(content);
+          } catch {
+            throw new BridgeProtocolError(`Canvas acknowledgement for "${operationId}" is not valid JSON.`);
+          }
+          return validateCanvasWriteAcknowledgement(acknowledgement, { operationId, harnessId: session.harnessId });
+        }
+        await sleep(pollIntervalMs);
+      }
+      throw new BridgeProtocolError(`Timed out waiting for Canvas acknowledgement of "${operationId}".`);
+    }
+    function validateCanvasWriteAcknowledgement(acknowledgement, expected = {}) {
+      if (!acknowledgement || acknowledgement.version !== PROTOCOL_VERSION) throw new BridgeProtocolError("Canvas acknowledgement has an unsupported protocol version.");
+      for (const field of ["operationId", "harnessId", "status", "receivedAt"]) {
+        if (typeof acknowledgement[field] !== "string" || !acknowledgement[field]) throw new BridgeProtocolError(`Canvas acknowledgement field "${field}" is required.`);
+      }
+      if (!acknowledgement.operationId.startsWith("write-") || !MESSAGE_ID.test(acknowledgement.operationId)) throw new BridgeProtocolError("Canvas acknowledgement operation ID is invalid.");
+      if (!["accepted", "rejected", "failed"].includes(acknowledgement.status)) throw new BridgeProtocolError(`Unsupported Canvas acknowledgement status "${acknowledgement.status}".`);
+      if (expected.operationId && acknowledgement.operationId !== expected.operationId) throw new BridgeProtocolError("Canvas acknowledgement belongs to a different operation.");
+      if (expected.harnessId && acknowledgement.harnessId !== expected.harnessId) throw new BridgeProtocolError("Canvas acknowledgement belongs to a different harness.");
+      return acknowledgement;
+    }
+    async function writeCanvasWriteAcknowledgement2(session, acknowledgement) {
+      validateCanvasWriteAcknowledgement(acknowledgement, { harnessId: session.harnessId });
+      const acknowledgementPath = path2.join(session.writeAcknowledgementsDirectory, `${acknowledgement.operationId}.json`);
+      await writeJsonAtomically(acknowledgementPath, acknowledgement);
+      return acknowledgementPath;
+    }
     async function waitForAcknowledgement2(session, messageId, { timeoutMs = 1e4, pollIntervalMs = 100 } = {}) {
       const acknowledgementPath = path2.join(session.acknowledgementsDirectory, `${messageId}.json`);
       const deadline = Date.now() + timeoutMs;
@@ -981,17 +978,17 @@ var require_pi_bridge_transport = __commonJS({
     async function writeJsonAtomically(filePath, value) {
       const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
       try {
-        await fs2.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}
+        await fs.writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}
 `, { encoding: "utf8", mode: 384 });
-        await fs2.rename(temporaryPath, filePath);
+        await fs.rename(temporaryPath, filePath);
       } catch (error) {
-        await fs2.rm(temporaryPath, { force: true });
+        await fs.rm(temporaryPath, { force: true });
         throw error;
       }
     }
     async function readFileOrNull(filePath) {
       try {
-        return await fs2.readFile(filePath, "utf8");
+        return await fs.readFile(filePath, "utf8");
       } catch (error) {
         if (error && error.code === "ENOENT") return null;
         throw error;
@@ -1009,7 +1006,13 @@ var require_pi_bridge_transport = __commonJS({
       validateBridgeMessage,
       waitForAcknowledgement: waitForAcknowledgement2,
       writeAcknowledgement,
-      writeBridgeMessage: writeBridgeMessage2
+      writeBridgeMessage: writeBridgeMessage2,
+      createCanvasWriteOperation,
+      validateCanvasWriteOperation: validateCanvasWriteOperation2,
+      validateCanvasWriteAcknowledgement,
+      waitForWriteAcknowledgement,
+      writeCanvasWriteAcknowledgement: writeCanvasWriteAcknowledgement2,
+      writeCanvasWriteOperation
     };
   }
 });
@@ -1020,6 +1023,7 @@ var require_canvas_graph = __commonJS({
     "use strict";
     var crypto2 = require("crypto");
     var path2 = require("path");
+    var { parsePiHarnessNode: parsePiHarnessNode2 } = require_pi_harness();
     var CanvasGraphError = class extends Error {
       constructor(message) {
         super(message);
@@ -1072,6 +1076,45 @@ var require_canvas_graph = __commonJS({
       }
       return sources;
     }
+    function getOutgoingTargets2(graph, harnessNodeId) {
+      const nodesById = indexNodes(graph);
+      if (!nodesById.has(harnessNodeId)) throw new CanvasGraphError(`Harness node "${harnessNodeId}" was not found.`);
+      const targets = [];
+      for (const edge of graph.edges) {
+        if (edge.fromNode !== harnessNodeId) continue;
+        const node = nodesById.get(edge.toNode);
+        if (!node) throw new CanvasGraphError(`Canvas edge "${edge.id || "unknown"}" references a missing node.`);
+        if (node.type === "text") {
+          if (typeof node.text !== "string") throw new CanvasGraphError(`Text target node "${node.id}" has no text content.`);
+          if (parsePiHarnessNode2(node.text).valid) throw new CanvasGraphError(`Pi harness node "${node.id}" cannot be a write target.`);
+          targets.push({ id: node.id, type: "text", label: sourceTitle(node), file: null });
+        } else if (node.type === "file") {
+          if (typeof node.file !== "string" || !node.file) throw new CanvasGraphError(`File target node "${node.id}" has no file path.`);
+          targets.push({ id: node.id, type: "file", label: node.file, file: node.file });
+        } else {
+          throw new CanvasGraphError(`Unsupported target node type "${node.type}" for node "${node.id}".`);
+        }
+      }
+      return targets;
+    }
+    function resolveOutgoingTarget(graph, harnessNodeId, targetNodeId) {
+      const target = getOutgoingTargets2(graph, harnessNodeId).find((candidate) => candidate.id === targetNodeId);
+      if (!target) throw new CanvasGraphError(`Canvas node "${targetNodeId}" is not a direct outgoing target of harness "${harnessNodeId}".`);
+      return target;
+    }
+    function indexNodes(graph) {
+      const nodesById = /* @__PURE__ */ new Map();
+      for (const node of graph.nodes) {
+        if (!node || typeof node.id !== "string" || !node.id) throw new CanvasGraphError("Canvas nodes must have IDs.");
+        if (nodesById.has(node.id)) throw new CanvasGraphError(`Duplicate Canvas node ID "${node.id}".`);
+        nodesById.set(node.id, node);
+      }
+      for (const edge of graph.edges) {
+        if (!edge || typeof edge.fromNode !== "string" || typeof edge.toNode !== "string") throw new CanvasGraphError("Canvas edges must include fromNode and toNode IDs.");
+        if (!nodesById.has(edge.fromNode) || !nodesById.has(edge.toNode)) throw new CanvasGraphError(`Canvas edge "${edge.id || "unknown"}" references a missing node.`);
+      }
+      return nodesById;
+    }
     async function resolveIncomingSourceNodes2(graph, harnessNodeId, readFile) {
       if (typeof readFile !== "function") throw new CanvasGraphError("A vault file resolver is required for file Canvas nodes.");
       const sources = getIncomingSourceNodes(graph, harnessNodeId, { allowFiles: true });
@@ -1116,14 +1159,69 @@ ${source.content}`);
     function sha256(content) {
       return `sha256:${crypto2.createHash("sha256").update(content).digest("hex")}`;
     }
-    module2.exports = { CanvasGraphError, buildCanvasMessageContent: buildCanvasMessageContent2, getIncomingSourceNodes, messageFingerprint: messageFingerprint2, parseCanvasGraph: parseCanvasGraph2, resolveIncomingSourceNodes: resolveIncomingSourceNodes2 };
+    module2.exports = { CanvasGraphError, buildCanvasMessageContent: buildCanvasMessageContent2, getIncomingSourceNodes, getOutgoingTargets: getOutgoingTargets2, messageFingerprint: messageFingerprint2, parseCanvasGraph: parseCanvasGraph2, resolveIncomingSourceNodes: resolveIncomingSourceNodes2, resolveOutgoingTarget };
+  }
+});
+
+// src/canvas-writer.js
+var require_canvas_writer = __commonJS({
+  "src/canvas-writer.js"(exports2, module2) {
+    "use strict";
+    var { CanvasGraphError, parseCanvasGraph: parseCanvasGraph2, resolveOutgoingTarget } = require_canvas_graph();
+    var mutationQueues = /* @__PURE__ */ new Map();
+    function appendContent(existing, content) {
+      if (!existing) return content;
+      if (!content) return existing;
+      return existing.endsWith("\n") ? `${existing}${content}` : `${existing}
+${content}`;
+    }
+    function applyMode(existing, content, mode) {
+      if (mode === "replace") return content;
+      if (mode === "append") return appendContent(existing, content);
+      throw new CanvasGraphError(`Unsupported write mode "${mode}".`);
+    }
+    function enqueue(key, operation) {
+      const previous = mutationQueues.get(key) || Promise.resolve();
+      const current = previous.catch(() => {
+      }).then(operation);
+      const settled = current.catch(() => {
+      }).finally(() => {
+        if (mutationQueues.get(key) === settled) mutationQueues.delete(key);
+      });
+      mutationQueues.set(key, settled);
+      return current;
+    }
+    async function writeCanvasOrVaultTarget2({ vault, canvasFile, harnessNodeId, targetNodeId, content, mode = "replace" }) {
+      if (!vault || !canvasFile) throw new CanvasGraphError("Canvas writer requires a vault and Canvas file.");
+      if (typeof content !== "string") throw new CanvasGraphError("Canvas write content must be a string.");
+      return enqueue(canvasFile.path, async () => {
+        const graph = parseCanvasGraph2(await vault.cachedRead(canvasFile));
+        const target = resolveOutgoingTarget(graph, harnessNodeId, targetNodeId);
+        if (target.type === "text") {
+          await vault.process(canvasFile, (current) => {
+            const liveGraph = parseCanvasGraph2(current);
+            const liveTarget = resolveOutgoingTarget(liveGraph, harnessNodeId, targetNodeId);
+            const node = liveGraph.nodes.find((candidate) => candidate.id === liveTarget.id);
+            node.text = applyMode(node.text, content, mode);
+            return `${JSON.stringify(liveGraph, null, 2)}
+`;
+          });
+          return { targetNodeId: target.id, targetType: target.type, mode };
+        }
+        const file = vault.getAbstractFileByPath(target.file);
+        if (!file) throw new CanvasGraphError(`Referenced Canvas file "${target.file}" was not found in the vault.`);
+        await vault.process(file, (current) => applyMode(current, content, mode));
+        return { targetNodeId: target.id, targetType: target.type, file: target.file, mode };
+      });
+    }
+    module2.exports = { appendContent, applyMode, writeCanvasOrVaultTarget: writeCanvasOrVaultTarget2 };
   }
 });
 
 // src/main.js
-var { Plugin, Notice, FileSystemAdapter, TFile, TFolder } = require("obsidian");
+var { Plugin, Notice, FileSystemAdapter, ItemView, TFile, TFolder } = require("obsidian");
 var crypto = require("crypto");
-var fs = require("fs/promises");
+var fsp = require("fs/promises");
 var path = require("path");
 var { VIEW_TYPE, BLOCK_LANG, DEFAULT_SETTINGS } = require_constants();
 var shell = require_shell();
@@ -1132,9 +1230,9 @@ var { TerminalSession } = require_terminal_session();
 var { BlockSessions, newBlockMarkdown } = require_block_sessions();
 var { getActiveCanvas, addPiHarnessToCanvas, addTerminalToCanvas } = require_canvas();
 var { OpenTerminalSettingTab } = require_settings_tab();
-var { BridgeModifiedError, ensurePiBridgeInstalled } = require_pi_bridge_installer();
-var { createBridgeMessage, createBridgeSession, waitForAcknowledgement, writeBridgeMessage } = require_pi_bridge_transport();
-var { buildCanvasMessageContent, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes } = require_canvas_graph();
+var { createBridgeMessage, createBridgeSession, waitForAcknowledgement, writeBridgeMessage, validateCanvasWriteOperation, writeCanvasWriteAcknowledgement } = require_pi_bridge_transport();
+var { buildCanvasMessageContent, getOutgoingTargets, messageFingerprint, parseCanvasGraph, resolveIncomingSourceNodes } = require_canvas_graph();
+var { writeCanvasOrVaultTarget } = require_canvas_writer();
 var { findDuplicateHarnessIds, HARNESS_LANGUAGE, parsePiHarnessNode } = require_pi_harness();
 var OpenTerminalPlugin = class extends Plugin {
   async onload() {
@@ -1142,6 +1240,7 @@ var OpenTerminalPlugin = class extends Plugin {
     this.piHarnessSessions = /* @__PURE__ */ new Map();
     this.autoDeliveryFingerprints = /* @__PURE__ */ new Map();
     this.autoDeliveryTimers = /* @__PURE__ */ new Map();
+    this.canvasWriteWatchers = /* @__PURE__ */ new Map();
     this.registerEvent(this.app.vault.on("modify", (file) => this.scheduleAutoDelivery(file)));
     this.registerView(VIEW_TYPE, (leaf) => new TerminalView(leaf, this));
     this.addRibbonIcon("terminal-square", "Open terminal", () => {
@@ -1220,16 +1319,6 @@ var OpenTerminalPlugin = class extends Plugin {
         return true;
       }
     });
-    this.addCommand({
-      id: "install-pi-bridge",
-      name: "Install Open Terminal Pi bridge",
-      callback: () => this.installPiBridge()
-    });
-    this.addCommand({
-      id: "reinstall-pi-bridge",
-      name: "Reinstall Open Terminal Pi bridge (overwrite local changes)",
-      callback: () => this.installPiBridge({ force: true })
-    });
     this.addSettingTab(new OpenTerminalSettingTab(this.app, this));
   }
   onunload() {
@@ -1237,6 +1326,8 @@ var OpenTerminalPlugin = class extends Plugin {
     this.piHarnessBlocks.disposeAll();
     for (const timer of this.autoDeliveryTimers.values()) clearTimeout(timer);
     this.autoDeliveryTimers.clear();
+    for (const watcher of this.canvasWriteWatchers.values()) clearInterval(watcher);
+    this.canvasWriteWatchers.clear();
   }
   /**
    * Public API for other plugins: opens a terminal and runs a command.
@@ -1282,31 +1373,6 @@ var OpenTerminalPlugin = class extends Plugin {
     await leaf.setViewState({ type: VIEW_TYPE, active: true, state: { cwd, command, env } });
     workspace.revealLeaf(leaf);
     return leaf.view;
-  }
-  async installPiBridge({ force = false } = {}) {
-    const vaultPath = this.getVaultPath();
-    if (!vaultPath) {
-      new Notice("Could not determine the vault path for Pi bridge installation.");
-      return null;
-    }
-    try {
-      const result = await ensurePiBridgeInstalled({
-        sourcePath: path.join(this.pluginDir(), "bridge", "open-terminal-canvas.js"),
-        vaultPath,
-        pluginVersion: this.manifest.version,
-        force
-      });
-      const action = result.status === "current" ? "is already current" : `${result.status} successfully`;
-      new Notice(`Open Terminal Pi bridge ${action}.`);
-      return result;
-    } catch (error) {
-      if (error instanceof BridgeModifiedError) {
-        new Notice("The Open Terminal Pi bridge has local changes. Use the reinstall command to overwrite it.");
-        return null;
-      }
-      new Notice(`Could not install the Open Terminal Pi bridge: ${error.message}`);
-      return null;
-    }
   }
   scheduleAutoDelivery(file) {
     if (!(file instanceof TFile) || file.extension !== "canvas") return;
@@ -1367,6 +1433,11 @@ var OpenTerminalPlugin = class extends Plugin {
   }
   /** Creates the live Pi terminal rendered inside a pi-harness Canvas card. */
   async createEmbeddedPiHarnessSession(source, sourcePath) {
+    sourcePath = sourcePath || this.getActiveCanvasPath();
+    if (!sourcePath) {
+      new Notice("Could not determine the Canvas file for this Pi harness.");
+      return null;
+    }
     const declaration = parsePiHarnessNode(`\`\`\`${HARNESS_LANGUAGE}
 ${source}
 \`\`\``);
@@ -1377,23 +1448,36 @@ ${source}
     const harnessId = declaration.harness.id;
     const existing = this.piHarnessSessions.get(harnessId);
     if (existing && existing.terminal && !existing.terminal.disposed) return existing.terminal;
-    if (!await this.installPiBridge()) return null;
     const bridge = await createBridgeSession();
     bridge.harnessId = harnessId;
+    bridge.canvasPath = sourcePath;
+    bridge.harnessNodeId = await this.findHarnessNodeId(sourcePath, harnessId);
+    const targets = await this.getCanvasWriteTargets(bridge);
     const vaultPath = this.getVaultPath();
     const env = {
       OPEN_TERMINAL_VAULT_ID: crypto.createHash("sha256").update(vaultPath).digest("hex"),
       OPEN_TERMINAL_HARNESS_ID: harnessId,
       OPEN_TERMINAL_BRIDGE_DIR: bridge.directory,
       OPEN_TERMINAL_BRIDGE_TOKEN: bridge.bridgeToken,
-      OPEN_TERMINAL_PROTOCOL_VERSION: String(bridge.protocolVersion)
+      OPEN_TERMINAL_PROTOCOL_VERSION: String(bridge.protocolVersion),
+      OPEN_TERMINAL_CANVAS_PATH: bridge.canvasPath || "",
+      OPEN_TERMINAL_HARNESS_NODE_ID: bridge.harnessNodeId || "",
+      OPEN_TERMINAL_CANVAS_TARGETS: JSON.stringify(targets)
     };
     const executable = this.settings.piPath.trim() || "pi";
-    const terminal = new TerminalSession(this, { cwd: vaultPath, command: this.quoteArg(executable), env });
+    const bridgeExtensionPath = path.join(this.pluginDir(), "bridge", "open-terminal-canvas.js");
+    const piCommand = `${this.quoteArg(executable)} --extension ${this.quoteArg(bridgeExtensionPath)} --exclude-tools edit,write`;
+    const terminal = new TerminalSession(this, { cwd: vaultPath, command: piCommand, env });
     bridge.terminal = terminal;
     this.piHarnessSessions.set(harnessId, bridge);
+    this.startCanvasWriteWatcher(bridge);
     if (sourcePath) void this.baselineAutoDelivery(sourcePath, harnessId);
     return terminal;
+  }
+  getActiveCanvasPath() {
+    const view = this.app.workspace.getActiveViewOfType(ItemView);
+    if (!view || view.getViewType() !== "canvas") return null;
+    return view.file?.path || view.getState?.().file || null;
   }
   async baselineAutoDelivery(sourcePath, harnessId) {
     const file = this.app.vault.getAbstractFileByPath(sourcePath);
@@ -1409,11 +1493,87 @@ ${source}
     } catch {
     }
   }
+  async findHarnessNodeId(sourcePath, harnessId) {
+    const file = this.app.vault.getAbstractFileByPath(sourcePath);
+    if (!(file instanceof TFile) || file.extension !== "canvas") return null;
+    const graph = parseCanvasGraph(await this.app.vault.cachedRead(file));
+    const matches = graph.nodes.filter((node) => node.type === "text" && parsePiHarnessNode(node.text).harness?.id === harnessId);
+    return matches.length === 1 ? matches[0].id : null;
+  }
+  async getCanvasWriteTargets(bridge) {
+    if (!bridge.canvasPath || !bridge.harnessNodeId) return [];
+    const file = this.app.vault.getAbstractFileByPath(bridge.canvasPath);
+    if (!(file instanceof TFile)) return [];
+    try {
+      const graph = parseCanvasGraph(await this.app.vault.cachedRead(file));
+      return getOutgoingTargets(graph, bridge.harnessNodeId);
+    } catch {
+      return [];
+    }
+  }
+  startCanvasWriteWatcher(bridge) {
+    bridge.writeProcessing = Promise.resolve();
+    const process2 = () => {
+      bridge.writeProcessing = bridge.writeProcessing.then(() => this.processCanvasWriteOperations(bridge)).catch(() => {
+      });
+    };
+    const timer = setInterval(process2, 100);
+    this.canvasWriteWatchers.set(bridge.harnessId, timer);
+    process2();
+  }
+  async processCanvasWriteOperations(bridge) {
+    if (!bridge || !bridge.canvasPath) return;
+    let names;
+    try {
+      names = (await fsp.readdir(bridge.outboxDirectory)).filter((name) => name.endsWith(".json")).sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const operationPath = path.join(bridge.outboxDirectory, name);
+      let operation;
+      try {
+        operation = JSON.parse(await fsp.readFile(operationPath, "utf8"));
+        validateCanvasWriteOperation(operation, { harnessId: bridge.harnessId, bridgeToken: bridge.bridgeToken });
+        if (operation.canvasPath !== bridge.canvasPath) throw new Error("Canvas operation does not match the active harness session.");
+        if (bridge.harnessNodeId && operation.harnessNodeId !== bridge.harnessNodeId) throw new Error("Canvas operation targets a different harness node.");
+        const harnessNodeId = bridge.harnessNodeId || operation.harnessNodeId;
+        bridge.harnessNodeId = harnessNodeId;
+        const canvasFile = this.app.vault.getAbstractFileByPath(bridge.canvasPath);
+        if (!(canvasFile instanceof TFile)) throw new Error(`Canvas file "${bridge.canvasPath}" was not found.`);
+        const result = await writeCanvasOrVaultTarget({ vault: this.app.vault, canvasFile, harnessNodeId, targetNodeId: operation.targetNodeId, content: operation.content, mode: operation.mode });
+        await this.writeCanvasOperationAck(bridge, operation, { status: "accepted", ...result });
+        await this.moveCanvasOperation(operationPath, path.join(bridge.writeProcessedDirectory, name));
+      } catch (error) {
+        const operationId = operation && operation.operationId ? operation.operationId : path.basename(name, ".json");
+        if (typeof operationId === "string" && operationId.startsWith("write-")) {
+          await this.writeCanvasOperationAck(bridge, { operationId, harnessId: bridge.harnessId }, { status: "rejected", error: error.message });
+          await this.moveCanvasOperation(operationPath, path.join(bridge.writeErrorsDirectory, name));
+        }
+      }
+    }
+  }
+  async writeCanvasOperationAck(bridge, operation, result) {
+    await writeCanvasWriteAcknowledgement(bridge, {
+      version: bridge.protocolVersion,
+      operationId: operation.operationId,
+      harnessId: bridge.harnessId,
+      receivedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      ...result
+    });
+  }
+  async moveCanvasOperation(from, to) {
+    try {
+      await fsp.rename(from, to);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
   async isPiHarnessRegistered(harnessId) {
     const session = this.piHarnessSessions.get(harnessId);
     if (!session) return false;
     try {
-      const registration = JSON.parse(await fs.readFile(session.sessionPath, "utf8"));
+      const registration = JSON.parse(await fsp.readFile(session.sessionPath, "utf8"));
       return registration.protocolVersion === session.protocolVersion && registration.harnessId === harnessId;
     } catch {
       return false;
