@@ -8,14 +8,16 @@ const { createHarnessSession } = require("./harness-session");
 const { liveCanvasContent, openCanvasPaths } = require("./canvas");
 const { parseCanvasGraph } = require("./canvas-graph");
 
-const DELIVERY_DEBOUNCE_MS = 750;
+const SAVE_SYNC_DEBOUNCE_MS = 750;
+const LIVE_MIRROR_INTERVAL_MS = 250;
 
 class HarnessManager {
   constructor(plugin, providers) {
     this.plugin = plugin;
     this.providers = providers;
     this.sessions = new Map();
-    this.deliveryTimers = new Map();
+    this.syncTimers = new Map();
+    this.liveMirrorTimers = new Map();
   }
 
   key(canvasPath, nodeId) {
@@ -67,23 +69,36 @@ class HarnessManager {
     }
     session.onDispose = () => this.remove(session);
     this.sessions.set(key, session);
+    this.startLiveMirror(canvasPath);
     session.start();
     return session.terminal;
   }
 
-  scheduleDelivery(file) {
+  scheduleSync(file) {
     if (!(file instanceof TFile) || file.extension !== "canvas") return;
-    clearTimeout(this.deliveryTimers.get(file.path));
-    this.deliveryTimers.set(file.path, setTimeout(() => {
-      this.deliveryTimers.delete(file.path);
-      void this.deliver(file);
-    }, DELIVERY_DEBOUNCE_MS));
+    clearTimeout(this.syncTimers.get(file.path));
+    this.syncTimers.set(file.path, setTimeout(() => {
+      this.syncTimers.delete(file.path);
+      void this.mirror(file.path, { notify: true });
+    }, SAVE_SYNC_DEBOUNCE_MS));
   }
 
-  async deliver(file) {
+  /**
+   * Obsidian's vault modify event only observes saved Canvas data. Poll the live Canvas document
+   * while a harness is open so unsaved card and edge edits reach Pi as well.
+   */
+  startLiveMirror(canvasPath) {
+    if (this.liveMirrorTimers.has(canvasPath)) return;
+    this.liveMirrorTimers.set(canvasPath, setInterval(() => {
+      void this.mirror(canvasPath);
+    }, LIVE_MIRROR_INTERVAL_MS));
+  }
+
+  /** Writes the current Canvas graph into every live harness session on that Canvas. */
+  async mirror(canvasPath, { notify = false } = {}) {
     let graph;
     try {
-      graph = (await this.canvasGraphs(file.path))[0];
+      graph = (await this.canvasGraphs(canvasPath))[0];
       if (!graph || findDuplicateHarnessIds(graph.nodes).length) return;
     } catch {
       return;
@@ -91,13 +106,12 @@ class HarnessManager {
     for (const node of graph.nodes.filter((candidate) => candidate.type === "text")) {
       const declaration = parseHarnessNode(node.text);
       if (!declaration.valid) continue;
-      const session = this.sessions.get(this.key(file.path, node.id));
+      const session = this.sessions.get(this.key(canvasPath, node.id));
       if (!session) continue;
       try {
-        await session.deliver(graph);
+        await session.syncState(graph);
       } catch (error) {
-        session.fingerprint = null;
-        this.plugin.notify(`Could not auto-send data to ${declaration.harness.id}: ${error.message}`);
+        if (notify) this.plugin.notify(`Could not refresh Canvas state for ${declaration.harness.id}: ${error.message}`);
       }
     }
   }
@@ -126,12 +140,19 @@ class HarnessManager {
   }
 
   remove(session) {
-    if (this.sessions.get(session.key) === session) this.sessions.delete(session.key);
+    if (this.sessions.get(session.key) !== session) return;
+    this.sessions.delete(session.key);
+    if (![...this.sessions.values()].some((candidate) => candidate.canvasPath === session.canvasPath)) {
+      clearInterval(this.liveMirrorTimers.get(session.canvasPath));
+      this.liveMirrorTimers.delete(session.canvasPath);
+    }
   }
 
   dispose() {
-    for (const timer of this.deliveryTimers.values()) clearTimeout(timer);
-    this.deliveryTimers.clear();
+    for (const timer of this.syncTimers.values()) clearTimeout(timer);
+    this.syncTimers.clear();
+    for (const timer of this.liveMirrorTimers.values()) clearInterval(timer);
+    this.liveMirrorTimers.clear();
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();
   }
