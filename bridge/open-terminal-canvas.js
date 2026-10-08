@@ -125,67 +125,10 @@ export default function openTerminalCanvasBridge(pi) {
     return state;
   }
 
-  function requireCanvasContext() {
-    const context = state || readEnvironment();
-    const canvasPath = context?.canvasPath || process.env.OPEN_TERMINAL_CANVAS_PATH;
-    const harnessNodeId = context?.harnessNodeId || process.env.OPEN_TERMINAL_HARNESS_NODE_ID || null;
-    const harnessId = context?.harnessId || process.env.OPEN_TERMINAL_HARNESS_ID || null;
-    if (!canvasPath) throw new Error("Canvas path is missing from the harness session.");
-    if (!harnessNodeId && !harnessId) throw new Error("The harness session has neither a harness node ID nor a harness ID.");
-    return { canvasPath, harnessNodeId, harnessId };
-  }
-
   async function findConnectedNodes() {
-    const { canvasPath: relativeCanvasPath, harnessNodeId: configuredHarnessNodeId, harnessId } = requireCanvasContext();
-    const canvasPath = path.resolve(process.cwd(), relativeCanvasPath);
-    let graph;
-    try {
-      graph = JSON.parse(await fsp.readFile(canvasPath, "utf8"));
-    } catch {
-      throw new Error(`The Canvas document "${relativeCanvasPath}" could not be read or is not valid JSON.`);
-    }
-    if (!graph || !Array.isArray(graph.nodes) || !Array.isArray(graph.edges)) throw new Error("The Canvas document must contain nodes and edges arrays.");
-
-    const nodesById = new Map(graph.nodes.map((node) => [node.id, node]));
-    const harnessNodeId = configuredHarnessNodeId || findHarnessNodeId(graph.nodes, harnessId);
-    if (!harnessNodeId || !nodesById.has(harnessNodeId)) throw new Error(`Harness node "${configuredHarnessNodeId || harnessId || "unknown"}" was not found.`);
-    if (state && !state.harnessNodeId) state.harnessNodeId = harnessNodeId;
-
-    const connected = new Map();
-    for (const edge of graph.edges) {
-      let nodeId;
-      let direction;
-      if (edge.fromNode === harnessNodeId) {
-        nodeId = edge.toNode;
-        direction = "outgoing";
-      } else if (edge.toNode === harnessNodeId) {
-        nodeId = edge.fromNode;
-        direction = "incoming";
-      } else {
-        continue;
-      }
-      const node = nodesById.get(nodeId);
-      if (!node) continue;
-      const existing = connected.get(node.id) || { id: node.id, type: node.type, directions: [] };
-      if (!existing.directions.includes(direction)) existing.directions.push(direction);
-      if (node.type === "file") existing.file = node.file || null;
-      if (node.type === "text") {
-        const firstLine = typeof node.text === "string" ? node.text.split(/\r?\n/).find((line) => line.trim()) : "";
-        existing.label = (firstLine || node.id).replace(/^\s*#{1,6}\s+/, "").trim() || node.id;
-      } else if (!existing.label) {
-        existing.label = node.file || node.id;
-      }
-      connected.set(node.id, existing);
-    }
-    return [...connected.values()];
-  }
-
-  function findHarnessNodeId(nodes, harnessId) {
-    if (!harnessId) return null;
-    const escapedHarnessId = harnessId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const declaration = new RegExp("^\\s*id\\s*:\\s*" + escapedHarnessId + "\\s*$", "mi");
-    const node = nodes.find((candidate) => candidate?.type === "text" && typeof candidate.text === "string" && /```pi-harness/.test(candidate.text) && declaration.test(candidate.text));
-    return node?.id || null;
+    const context = state || readEnvironment();
+    if (!context) throw new Error("Canvas bridge state is unavailable.");
+    return context.connections;
   }
 
   function readEnvironment() {
@@ -198,6 +141,7 @@ export default function openTerminalCanvasBridge(pi) {
       directory, harnessId, bridgeToken,
       canvasPath: process.env.OPEN_TERMINAL_CANVAS_PATH || "",
       harnessNodeId: process.env.OPEN_TERMINAL_HARNESS_NODE_ID || "",
+      connections: parseJsonEnvironment("OPEN_TERMINAL_CANVAS_CONNECTIONS", []),
       sessionId: path.basename(directory),
       inboxDirectory: path.join(directory, "inbox"),
       processedDirectory: path.join(directory, "processed"),
@@ -223,11 +167,11 @@ export default function openTerminalCanvasBridge(pi) {
 
   async function getProtectedPaths() {
     const paths = new Set([normalizePath(state.canvasPath)]);
-    try {
-      const graph = JSON.parse(await fsp.readFile(path.resolve(process.cwd(), state.canvasPath), "utf8"));
-      const outgoing = new Set((graph.edges || []).filter((edge) => edge.fromNode === state.harnessNodeId).map((edge) => edge.toNode));
-      for (const node of graph.nodes || []) if (outgoing.has(node.id) && node.type === "file" && typeof node.file === "string") paths.add(normalizePath(node.file));
-    } catch {}
+    for (const connection of state.connections) {
+      if (connection.directions?.includes("outgoing") && connection.type === "file" && connection.file) {
+        paths.add(normalizePath(connection.file));
+      }
+    }
     return paths;
   }
 
@@ -264,6 +208,7 @@ export default function openTerminalCanvasBridge(pi) {
     if (!MESSAGE_ID.test(message.id) || !message.id.startsWith("msg-")) throw new Error("Invalid bridge message ID.");
     if (message.harnessId !== state.harnessId) throw new Error("Bridge message targets a different harness.");
     if (message.bridgeToken !== state.bridgeToken) throw new Error("Bridge message token is not authorized for this session.");
+    if (message.canvasPath !== state.canvasPath) throw new Error("Bridge message targets a different Canvas.");
     if (typeof message.content !== "string" || !Array.isArray(message.sourceNodes)) throw new Error("Invalid bridge message envelope.");
   }
 
@@ -295,6 +240,15 @@ function getToolPaths(toolName, input) {
 
 function normalizePath(value) {
   return path.resolve(process.cwd(), String(value)).replace(/\\/g, "/");
+}
+
+function parseJsonEnvironment(name, fallback) {
+  try {
+    const value = JSON.parse(process.env[name] || "");
+    return value === null ? fallback : value;
+  } catch {
+    return fallback;
+  }
 }
 
 async function writeJsonAtomically(filePath, value) {
