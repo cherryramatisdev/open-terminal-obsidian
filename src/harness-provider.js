@@ -21,7 +21,6 @@ class PiHarnessProvider {
       OPEN_TERMINAL_CANVAS_PATH: bridge.canvasPath || "",
       OPEN_TERMINAL_HARNESS_NODE_ID: bridge.harnessNodeId || "",
       OPEN_TERMINAL_CANVAS_TARGETS: JSON.stringify(bridge.targets || []),
-      OPEN_TERMINAL_CANVAS_CONNECTIONS: JSON.stringify(bridge.connections || []),
     };
     return {
       cwd: vaultPath,

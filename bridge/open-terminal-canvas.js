@@ -128,7 +128,18 @@ export default function openTerminalCanvasBridge(pi) {
   async function findConnectedNodes() {
     const context = state || readEnvironment();
     if (!context) throw new Error("Canvas bridge state is unavailable.");
-    return context.connections;
+    return readConnections(context);
+  }
+
+  async function readConnections(context) {
+    try {
+      const connections = JSON.parse(await fsp.readFile(path.join(context.directory, "connections.json"), "utf8"));
+      if (!Array.isArray(connections)) throw new Error("Invalid Canvas connections state.");
+      return connections;
+    } catch (error) {
+      if (error.code === "ENOENT") return [];
+      throw error;
+    }
   }
 
   function readEnvironment() {
@@ -141,7 +152,6 @@ export default function openTerminalCanvasBridge(pi) {
       directory, harnessId, bridgeToken,
       canvasPath: process.env.OPEN_TERMINAL_CANVAS_PATH || "",
       harnessNodeId: process.env.OPEN_TERMINAL_HARNESS_NODE_ID || "",
-      connections: parseJsonEnvironment("OPEN_TERMINAL_CANVAS_CONNECTIONS", []),
       sessionId: path.basename(directory),
       inboxDirectory: path.join(directory, "inbox"),
       processedDirectory: path.join(directory, "processed"),
@@ -167,7 +177,7 @@ export default function openTerminalCanvasBridge(pi) {
 
   async function getProtectedPaths() {
     const paths = new Set([normalizePath(state.canvasPath)]);
-    for (const connection of state.connections) {
+    for (const connection of await readConnections(state)) {
       if (connection.directions?.includes("outgoing") && connection.type === "file" && connection.file) {
         paths.add(normalizePath(connection.file));
       }
@@ -240,15 +250,6 @@ function getToolPaths(toolName, input) {
 
 function normalizePath(value) {
   return path.resolve(process.cwd(), String(value)).replace(/\\/g, "/");
-}
-
-function parseJsonEnvironment(name, fallback) {
-  try {
-    const value = JSON.parse(process.env[name] || "");
-    return value === null ? fallback : value;
-  } catch {
-    return fallback;
-  }
 }
 
 async function writeJsonAtomically(filePath, value) {

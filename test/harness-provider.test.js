@@ -24,14 +24,13 @@ test("providers expose a runtime-specific launch spec without owning Canvas stat
       canvasPath: "main.canvas",
       harnessNodeId: "node",
       targets: [{ id: "output", type: "text" }],
-      connections: [{ id: "input", directions: ["incoming"] }],
     },
   });
 
   assert.equal(provider.id, "pi");
   assert.equal(spec.cwd, "/vault");
   assert.match(spec.command, /open-terminal-canvas\.js/);
-  assert.equal(JSON.parse(spec.env.OPEN_TERMINAL_CANVAS_CONNECTIONS)[0].id, "input");
+  assert.deepEqual(JSON.parse(spec.env.OPEN_TERMINAL_CANVAS_TARGETS), [{ id: "output", type: "text" }]);
 });
 
 test("provider registry selects providers by declaration ID", () => {
