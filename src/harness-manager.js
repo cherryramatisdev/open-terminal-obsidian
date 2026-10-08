@@ -1,9 +1,11 @@
 "use strict";
 
+const fsp = require("fs/promises");
 const { TFile } = require("obsidian");
 const { createBridgeSession } = require("./harness-transport");
 const { findDuplicateHarnessIds, parseHarnessNode, parseHarnessSource } = require("./pi-harness");
 const { createHarnessSession } = require("./harness-session");
+const { liveCanvasContent, openCanvasPaths } = require("./canvas");
 const { parseCanvasGraph } = require("./canvas-graph");
 
 const DELIVERY_DEBOUNCE_MS = 750;
@@ -20,7 +22,7 @@ class HarnessManager {
     return `${canvasPath}:${nodeId}`;
   }
 
-  async create(source, canvasPath) {
+  async create(source, sourcePath) {
     const declaration = parseHarnessSource(source);
     if (!declaration.valid) {
       this.plugin.notify(`Invalid harness: ${declaration.errors.join(" ")}`);
@@ -31,11 +33,13 @@ class HarnessManager {
       this.plugin.notify(`Unsupported harness provider "${declaration.harness.agent}".`);
       return null;
     }
-    const harnessNodeId = await this.findNode(canvasPath, declaration.harness.id);
-    if (!harnessNodeId) {
-      this.plugin.notify(`Could not uniquely identify harness "${declaration.harness.id}" in ${canvasPath}.`);
+    const candidates = canvasCandidates(sourcePath, openCanvasPaths(this.plugin.app));
+    const located = await this.locate(candidates, declaration.harness.id);
+    if (!located) {
+      this.plugin.notify(`Could not uniquely identify harness "${declaration.harness.id}" in ${candidates[0] || "an open Canvas"}.`);
       return null;
     }
+    const { canvasPath, harnessNodeId, graph } = located;
     const key = this.key(canvasPath, harnessNodeId);
     const existing = this.sessions.get(key);
     if (existing && !existing.disposed) return existing.terminal;
@@ -44,15 +48,23 @@ class HarnessManager {
     bridge.harnessId = declaration.harness.id;
     bridge.canvasPath = canvasPath;
     bridge.harnessNodeId = harnessNodeId;
-    const session = await createHarnessSession({
-      plugin: this.plugin,
-      provider,
-      bridge,
-      key,
-      harnessId: declaration.harness.id,
-      canvasPath,
-      harnessNodeId,
-    });
+    let session;
+    try {
+      session = await createHarnessSession({
+        plugin: this.plugin,
+        provider,
+        bridge,
+        graph,
+        key,
+        harnessId: declaration.harness.id,
+        canvasPath,
+        harnessNodeId,
+      });
+    } catch (error) {
+      await fsp.rm(bridge.directory, { recursive: true, force: true }).catch(() => {});
+      this.plugin.notify(`Could not start harness "${declaration.harness.id}": ${error.message}`);
+      return null;
+    }
     session.onDispose = () => this.remove(session);
     this.sessions.set(key, session);
     session.start();
@@ -71,8 +83,8 @@ class HarnessManager {
   async deliver(file) {
     let graph;
     try {
-      graph = parseCanvasGraph(await this.plugin.app.vault.cachedRead(file));
-      if (findDuplicateHarnessIds(graph.nodes).length) return;
+      graph = (await this.canvasGraphs(file.path))[0];
+      if (!graph || findDuplicateHarnessIds(graph.nodes).length) return;
     } catch {
       return;
     }
@@ -90,12 +102,27 @@ class HarnessManager {
     }
   }
 
-  async findNode(canvasPath, harnessId) {
+  /** First candidate Canvas that holds exactly one node declaring the harness. */
+  async locate(canvasPaths, harnessId) {
+    for (const canvasPath of canvasPaths) {
+      for (const graph of await this.canvasGraphs(canvasPath)) {
+        const matches = graph.nodes.filter((node) => node.type === "text" && parseHarnessNode(node.text).harness?.id === harnessId);
+        if (matches.length === 1) return { canvasPath, harnessNodeId: matches[0].id, graph };
+        if (matches.length > 1) return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A Canvas code block has no source path and a card Obsidian created moments ago may not be
+   * in the saved file yet, so the live Canvas document is searched before the file on disk.
+   */
+  async canvasGraphs(canvasPath) {
+    const contents = [liveCanvasContent(this.plugin.app, canvasPath)];
     const file = this.plugin.app.vault.getAbstractFileByPath(canvasPath);
-    if (!(file instanceof TFile)) return null;
-    const graph = parseCanvasGraph(await this.plugin.app.vault.cachedRead(file));
-    const matches = graph.nodes.filter((node) => node.type === "text" && parseHarnessNode(node.text).harness?.id === harnessId);
-    return matches.length === 1 ? matches[0].id : null;
+    if (file instanceof TFile) contents.push(await this.plugin.app.vault.cachedRead(file));
+    return contents.filter(Boolean).map((content) => parseCanvasGraph(content));
   }
 
   remove(session) {
@@ -108,6 +135,15 @@ class HarnessManager {
     for (const session of this.sessions.values()) session.dispose();
     this.sessions.clear();
   }
+}
+
+/** Canvas files that may own a block: its own file first, then the open Canvas views. */
+function canvasCandidates(sourcePath, openPaths) {
+  const paths = [];
+  for (const candidate of [sourcePath, ...openPaths]) {
+    if (typeof candidate === "string" && candidate.endsWith(".canvas") && !paths.includes(candidate)) paths.push(candidate);
+  }
+  return paths;
 }
 
 module.exports = { HarnessManager };
