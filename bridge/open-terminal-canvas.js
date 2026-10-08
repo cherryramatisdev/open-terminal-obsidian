@@ -1,21 +1,61 @@
 // Bridge loaded directly by Pi from the Open Terminal Obsidian plugin.
 "use strict";
 
-import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool } from "@earendil-works/pi-coding-agent";
+import { buildCanvasContextContent, buildConnections, getOutgoingTargets, parseCanvasGraph, resolveIncomingSourceNodes } from "../src/canvas-graph.js";
+import { createCanvasWriteOperation, waitForWriteAcknowledgement, writeCanvasWriteOperation } from "../src/pi-bridge-transport.js";
 
 const PROTOCOL_VERSION = 1;
-const MESSAGE_ID = /^msg-[A-Za-z0-9-]+$/;
-const OPERATION_ID = /^write-[A-Za-z0-9-]+$/;
+const CONTEXT_RULE = "Call `read_context` before you reason about a request in this session. The context the user wants processed lives in the Obsidian Canvas nodes connected to this harness, not in the message itself.";
 
 export default function openTerminalCanvasBridge(pi) {
-  let watcher = null;
   let state = null;
-  let processing = Promise.resolve();
-  const processedIds = new Set();
+  let canvasState = null;
+  let contextRead = false;
+
+  pi.registerTool(defineTool({
+    name: "read_context",
+    label: "Read Canvas context",
+    description: "Read the full content of every Canvas node connected TO this harness, following incoming edges only: nodes this harness points at are outputs, not context. Call this before reasoning about any request in this session. File nodes are read from the vault; text nodes come from the live Canvas document.",
+    promptGuidelines: [CONTEXT_RULE],
+    parameters: Type.Object({
+      nodeId: Type.Optional(Type.String({ description: "Read only this incoming Canvas node. Omit to read every connected node." })),
+    }),
+    async execute(_toolCallId, params) {
+      const bridgeState = requireBridgeState();
+      const snapshot = await readCanvasState(bridgeState);
+      if (!snapshot) {
+        return {
+          content: [{ type: "text", text: "This harness has no Canvas state yet. Ask the user to reopen the Canvas." }],
+          details: { contextVersion: null, capturedAt: null, sources: [] },
+        };
+      }
+
+      const sources = await resolveIncomingSourceNodes(
+        snapshot.graph,
+        bridgeState.harnessNodeId,
+        readVaultFile,
+        params.nodeId ? { nodeId: params.nodeId } : {}
+      );
+      contextRead = true;
+
+      if (sources.length === 0) {
+        const text = params.nodeId
+          ? `Canvas node "${params.nodeId}" is not connected to this harness by an incoming edge.`
+          : "No Canvas node is connected to this harness yet. Ask the user to connect the nodes that hold the context.";
+        return { content: [{ type: "text", text }], details: { contextVersion: snapshot.version, capturedAt: snapshot.capturedAt, sources: [] } };
+      }
+
+      const assembled = buildCanvasContextContent(sources);
+      return {
+        content: [{ type: "text", text: assembled.content }],
+        details: { contextVersion: snapshot.version, capturedAt: snapshot.capturedAt, sources: assembled.sourceNodes },
+      };
+    },
+  }));
 
   pi.registerTool(defineTool({
     name: "find_connected_nodes",
@@ -23,7 +63,9 @@ export default function openTerminalCanvasBridge(pi) {
     description: "Inspect the current Canvas graph and list every node directly connected to this Pi harness, including whether the connection is incoming or outgoing. Use this before write_canvas_node when the target ID is unknown.",
     parameters: Type.Object({}),
     async execute() {
-      const nodes = await findConnectedNodes();
+      const bridgeState = requireBridgeState();
+      const snapshot = await readCanvasState(bridgeState);
+      const nodes = snapshot ? buildConnections(snapshot.graph, bridgeState.harnessNodeId) : [];
       return {
         content: [{ type: "text", text: JSON.stringify(nodes, null, 2) }],
         details: { nodes },
@@ -42,10 +84,7 @@ export default function openTerminalCanvasBridge(pi) {
     }),
     async execute(_toolCallId, params) {
       const bridgeState = requireBridgeState();
-      const operation = {
-        version: PROTOCOL_VERSION,
-        operationId: randomId("write"),
-        operation: "write_canvas_node",
+      const operation = createCanvasWriteOperation({
         harnessId: bridgeState.harnessId,
         bridgeToken: bridgeState.bridgeToken,
         canvasPath: bridgeState.canvasPath,
@@ -53,11 +92,9 @@ export default function openTerminalCanvasBridge(pi) {
         targetNodeId: params.targetNodeId,
         content: params.content,
         mode: params.mode || "replace",
-        createdAt: new Date().toISOString(),
-      };
-      validateOperation(operation);
-      await writeJsonAtomically(path.join(bridgeState.outboxDirectory, `${operation.operationId}.json`), operation);
-      const acknowledgement = await waitForWriteAcknowledgement(operation.operationId);
+      });
+      await writeCanvasWriteOperation(bridgeState, operation);
+      const acknowledgement = await waitForWriteAcknowledgement(bridgeState, operation.operationId);
       const target = acknowledgement.targetNodeId || operation.targetNodeId;
       if (acknowledgement.status !== "accepted") {
         return { isError: true, content: [{ type: "text", text: `Canvas target ${target} was rejected: ${acknowledgement.error || "write failed"}` }], details: acknowledgement };
@@ -67,27 +104,35 @@ export default function openTerminalCanvasBridge(pi) {
   }));
 
   pi.on("tool_call", async (event) => {
-    if (!state || (event.toolName !== "edit" && event.toolName !== "write")) return;
-    const protectedPaths = await getProtectedPaths();
     const attemptedPaths = getToolPaths(event.toolName, event.input);
+    if (!state || attemptedPaths.length === 0) return;
+    if (event.toolName === "read" && attemptedPaths.some((candidate) => candidate === normalizePath(state.canvasPath))) {
+      return { block: true, reason: "This Canvas document is live in Obsidian and reading it from disk can be stale. Use read_context for the content connected to this harness." };
+    }
+    if (event.toolName !== "edit" && event.toolName !== "write") return;
+    const protectedPaths = await getProtectedPaths();
     if (attemptedPaths.some((candidate) => protectedPaths.has(candidate))) {
       return { block: true, reason: "This path is a connected Canvas output. Use write_canvas_node with an explicit targetNodeId." };
     }
   });
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("before_agent_start", (event) => {
+    if (state && !contextRead) {
+      event.systemPromptOptions.sections.canvas_context = `This session is attached to the Obsidian Canvas \`${state.canvasPath}\`. The material the user wants processed lives in the nodes connected TO this harness, which only \`read_context\` can return.`;
+    } else {
+      delete event.systemPromptOptions.sections.canvas_context;
+    }
+  });
+
+  pi.on("session_start", async () => {
     state = readEnvironment();
     if (!state) return;
 
     const activeTools = pi.getActiveTools().filter((toolName) => toolName !== "edit" && toolName !== "write");
-    if (state.canvasPath && state.harnessNodeId) activeTools.push("find_connected_nodes", "write_canvas_node");
+    if (state.canvasPath && state.harnessNodeId) activeTools.push("read_context", "find_connected_nodes", "write_canvas_node");
     pi.setActiveTools([...new Set(activeTools)]);
 
     await Promise.all([
-      fsp.mkdir(state.inboxDirectory, { recursive: true, mode: 0o700 }),
-      fsp.mkdir(state.processedDirectory, { recursive: true, mode: 0o700 }),
-      fsp.mkdir(state.acknowledgementsDirectory, { recursive: true, mode: 0o700 }),
-      fsp.mkdir(state.errorsDirectory, { recursive: true, mode: 0o700 }),
       fsp.mkdir(state.outboxDirectory, { recursive: true, mode: 0o700 }),
       fsp.mkdir(state.writeAcknowledgementsDirectory, { recursive: true, mode: 0o700 }),
       fsp.mkdir(state.writeProcessedDirectory, { recursive: true, mode: 0o700 }),
@@ -102,19 +147,12 @@ export default function openTerminalCanvasBridge(pi) {
       sessionId: state.sessionId,
       startedAt: new Date().toISOString(),
     });
-
-    const scheduleScan = () => {
-      processing = processing.then(() => scanInbox(pi, ctx)).catch(() => undefined);
-    };
-    watcher = fs.watch(state.inboxDirectory, scheduleScan);
-    scheduleScan();
   });
 
   pi.on("session_shutdown", async () => {
-    if (watcher) watcher.close();
-    watcher = null;
-    await processing;
     state = null;
+    canvasState = null;
+    contextRead = false;
   });
 
   function requireBridgeState() {
@@ -125,21 +163,27 @@ export default function openTerminalCanvasBridge(pi) {
     return state;
   }
 
-  async function findConnectedNodes() {
-    const context = state || readEnvironment();
-    if (!context) throw new Error("Canvas bridge state is unavailable.");
-    return readConnections(context);
-  }
-
-  async function readConnections(context) {
+  /** Reads the plugin's live graph mirror once per Canvas revision. */
+  async function readCanvasState(context) {
+    let snapshot;
     try {
-      const connections = JSON.parse(await fsp.readFile(path.join(context.directory, "connections.json"), "utf8"));
-      if (!Array.isArray(connections)) throw new Error("Invalid Canvas connections state.");
-      return connections;
+      snapshot = JSON.parse(await fsp.readFile(context.canvasStatePath, "utf8"));
     } catch (error) {
-      if (error.code === "ENOENT") return [];
+      if (error.code === "ENOENT") return null;
       throw error;
     }
+    if (canvasState && canvasState.version === snapshot.contextVersion) return canvasState;
+    canvasState = {
+      version: snapshot.contextVersion,
+      capturedAt: snapshot.capturedAt,
+      graph: parseCanvasGraph(snapshot.graph),
+    };
+    return canvasState;
+  }
+
+  /** Canvas file nodes hold vault paths, and this process runs with the vault as its cwd. */
+  async function readVaultFile(filePath) {
+    return fsp.readFile(path.resolve(process.cwd(), filePath), "utf8");
   }
 
   function readEnvironment() {
@@ -152,11 +196,8 @@ export default function openTerminalCanvasBridge(pi) {
       directory, harnessId, bridgeToken,
       canvasPath: process.env.OPEN_TERMINAL_CANVAS_PATH || "",
       harnessNodeId: process.env.OPEN_TERMINAL_HARNESS_NODE_ID || "",
+      canvasStatePath: process.env.OPEN_TERMINAL_CANVAS_STATE_PATH || path.join(directory, "canvas-state.json"),
       sessionId: path.basename(directory),
-      inboxDirectory: path.join(directory, "inbox"),
-      processedDirectory: path.join(directory, "processed"),
-      acknowledgementsDirectory: path.join(directory, "acks"),
-      errorsDirectory: path.join(directory, "errors"),
       outboxDirectory: path.join(directory, "outbox"),
       writeProcessedDirectory: path.join(directory, "write-processed"),
       writeAcknowledgementsDirectory: path.join(directory, "write-acks"),
@@ -165,86 +206,22 @@ export default function openTerminalCanvasBridge(pi) {
     };
   }
 
-  async function waitForWriteAcknowledgement(operationId) {
-    const acknowledgementPath = path.join(state.writeAcknowledgementsDirectory, `${operationId}.json`);
-    const deadline = Date.now() + 10000;
-    while (Date.now() <= deadline) {
-      try { return JSON.parse(await fsp.readFile(acknowledgementPath, "utf8")); } catch (error) { if (error.code !== "ENOENT") throw error; }
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    throw new Error(`Timed out waiting for Canvas acknowledgement of ${operationId}.`);
-  }
-
   async function getProtectedPaths() {
     const paths = new Set([normalizePath(state.canvasPath)]);
-    for (const connection of await readConnections(state)) {
-      if (connection.directions?.includes("outgoing") && connection.type === "file" && connection.file) {
-        paths.add(normalizePath(connection.file));
-      }
+    const snapshot = await readCanvasState(state);
+    if (!snapshot) return paths;
+    for (const target of getOutgoingTargets(snapshot.graph, state.harnessNodeId)) {
+      if (target.type === "file" && target.file) paths.add(normalizePath(target.file));
     }
     return paths;
   }
-
-  async function scanInbox(api, ctx) {
-    if (!state) return;
-    const names = (await fsp.readdir(state.inboxDirectory)).filter((name) => name.endsWith(".json")).sort();
-    for (const name of names) await processMessage(api, ctx, path.join(state.inboxDirectory, name));
-  }
-
-  async function processMessage(api, ctx, messagePath) {
-    if (!state) return;
-    let message;
-    try {
-      message = JSON.parse(await fsp.readFile(messagePath, "utf8"));
-      validateMessage(message);
-      if (processedIds.has(message.id) || await fileExists(path.join(state.processedDirectory, `${message.id}.json`))) {
-        await moveIfPresent(messagePath, path.join(state.processedDirectory, `${message.id}.json`));
-        return;
-      }
-      const status = ctx.isIdle() ? "accepted" : "queued";
-      api.sendUserMessage(message.content, status === "queued" ? { deliverAs: "followUp" } : undefined);
-      processedIds.add(message.id);
-      await writeAcknowledgement(message, status);
-      await moveIfPresent(messagePath, path.join(state.processedDirectory, `${message.id}.json`));
-    } catch (error) {
-      const messageId = message && MESSAGE_ID.test(message.id) ? message.id : path.basename(messagePath, ".json");
-      await writeAcknowledgement({ id: messageId }, "failed", error.message);
-      await moveIfPresent(messagePath, path.join(state.errorsDirectory, `${messageId}.json`));
-    }
-  }
-
-  function validateMessage(message) {
-    if (!message || message.version !== PROTOCOL_VERSION) throw new Error("Unsupported bridge protocol version.");
-    if (!MESSAGE_ID.test(message.id) || !message.id.startsWith("msg-")) throw new Error("Invalid bridge message ID.");
-    if (message.harnessId !== state.harnessId) throw new Error("Bridge message targets a different harness.");
-    if (message.bridgeToken !== state.bridgeToken) throw new Error("Bridge message token is not authorized for this session.");
-    if (message.canvasPath !== state.canvasPath) throw new Error("Bridge message targets a different Canvas.");
-    if (typeof message.content !== "string" || !Array.isArray(message.sourceNodes)) throw new Error("Invalid bridge message envelope.");
-  }
-
-  async function writeAcknowledgement(message, status, error) {
-    if (!state || !MESSAGE_ID.test(message.id)) return;
-    const acknowledgement = { version: PROTOCOL_VERSION, messageId: message.id, harnessId: state.harnessId, status, receivedAt: new Date().toISOString() };
-    if (error) acknowledgement.error = error;
-    await writeJsonAtomically(path.join(state.acknowledgementsDirectory, `${message.id}.json`), acknowledgement);
-  }
-}
-
-function randomId(prefix) {
-  return `${prefix}-${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
-}
-
-function validateOperation(operation) {
-  if (operation.version !== PROTOCOL_VERSION || operation.operation !== "write_canvas_node") throw new Error("Unsupported Canvas operation.");
-  if (!OPERATION_ID.test(operation.operationId)) throw new Error("Invalid Canvas operation ID.");
-  if (!operation.harnessId || !operation.bridgeToken || !operation.canvasPath || !operation.harnessNodeId || !operation.targetNodeId) throw new Error("Incomplete Canvas operation.");
-  if (operation.mode !== "replace" && operation.mode !== "append") throw new Error("Invalid Canvas write mode.");
 }
 
 function getToolPaths(toolName, input) {
   if (!input || typeof input !== "object") return [];
-  if (toolName === "write") return [input.path || input.filePath].filter(Boolean).map(normalizePath);
-  if (toolName === "edit") return [input.path || input.filePath].filter(Boolean).map(normalizePath);
+  if (toolName === "write" || toolName === "edit" || toolName === "read") {
+    return [input.path || input.filePath].filter(Boolean).map(normalizePath);
+  }
   return [];
 }
 
@@ -256,12 +233,4 @@ async function writeJsonAtomically(filePath, value) {
   const temporaryPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
   await fsp.writeFile(temporaryPath, `${JSON.stringify(value)}\n`, { encoding: "utf8", mode: 0o600 });
   await fsp.rename(temporaryPath, filePath);
-}
-
-async function moveIfPresent(from, to) {
-  try { await fsp.rename(from, to); } catch (error) { if (error.code !== "ENOENT") throw error; }
-}
-
-async function fileExists(filePath) {
-  try { await fsp.access(filePath); return true; } catch { return false; }
 }
