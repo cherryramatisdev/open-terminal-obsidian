@@ -2,6 +2,7 @@
 
 const crypto = require("crypto");
 const path = require("path");
+const { RESEARCH_PARTNER_PROMPT } = require("./research-partner-prompt");
 
 class PiHarnessProvider {
   constructor(plugin) {
@@ -24,7 +25,7 @@ class PiHarnessProvider {
     };
     return {
       cwd: vaultPath,
-      command: `${this.plugin.quoteArg(executable)} --extension ${this.plugin.quoteArg(bridgeExtensionPath)} --exclude-tools edit,write`,
+      command: `${this.plugin.quoteArg(executable)} --extension ${this.plugin.quoteArg(bridgeExtensionPath)} --exclude-tools edit,write --system-prompt ${this.plugin.quoteArg(RESEARCH_PARTNER_PROMPT)}`,
       env,
     };
   }

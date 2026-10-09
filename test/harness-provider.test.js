@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { HarnessProviderRegistry, PiHarnessProvider } = require("../src/harness-provider");
+const { RESEARCH_PARTNER_PROMPT } = require("../src/research-partner-prompt");
 
 function plugin() {
   return {
@@ -30,6 +31,8 @@ test("providers expose a runtime-specific launch spec without owning Canvas stat
   assert.equal(provider.id, "pi");
   assert.equal(spec.cwd, "/vault");
   assert.match(spec.command, /open-terminal-canvas\.js/);
+  assert.match(spec.command, /--system-prompt /);
+  assert.ok(spec.command.includes(RESEARCH_PARTNER_PROMPT));
   assert.equal(spec.env.OPEN_TERMINAL_CANVAS_STATE_PATH, "/tmp/session/canvas-state.json");
 });
 
